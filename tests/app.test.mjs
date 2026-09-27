@@ -21,6 +21,8 @@ class Elem {
   get innerHTML() { this._html ||= ""; return this._html; }
   set className(v) { this.attrs.class = v; }
   get className() { return this.attrs.class || ""; }
+  set id(v) { this.attrs.id = v; }
+  get id() { return this.attrs.id || ""; }
   get textContent() { return this._text; }
   set textContent(v) { this._text = String(v); this.children = []; }
   _insert(c) { if (c.tag === "#fragment") { const kids = c.children.slice(); c.children = []; return kids; } return [c]; }
@@ -52,16 +54,26 @@ class Elem {
   }
   focus(){} blur(){} click(){ this.fire("click", { target: this }); }
   remove() { if (this.parentNode) { const i = this.parentNode.children.indexOf(this); if (i !== -1) this.parentNode.children.splice(i, 1); this.parentNode = null; } }
+  get lastElementChild() { return this.children[this.children.length - 1] || null; }
   setAttribute(k, v) { this.attrs[k] = v; if (k === "id") this.attrs.id = v; }
   getAttribute(k) { return this.attrs[k]; }
   querySelector(sel) {
-    // minimal support: ".w-host[data-wtype=…]", "textarea", ".pomo-time"
+    // supports: ".w-host[data-wtype=…]", "textarea", ".class", "[data-role=…]", "[data-wact2=…]", "#chat-url"
     const m = /^\.w-host\[data-wtype="([^"]+)"\]$/.exec(sel);
+    const rm = /^\[data-([\w-]+)="([^"]+)"\]$/.exec(sel);
+    const dm = (el) => {
+      if (!rm) return false;
+      const prop = rm[1].replace(/-([a-z])/g, (_, c) => c.toUpperCase());
+      return el.dataset[prop] === rm[2];
+    };
     const search = (el) => {
       for (const k of el.children) {
         if (m) {
           if ((k.attrs.class || "").split(" ").includes("w-host") && k.dataset.wtype === m[1]) return k;
-        } else if (sel === "textarea" && k.tag === "textarea") return k;
+        } else if (rm) {
+          if (dm(k)) return k;
+        } else if (sel.startsWith("#") && k.attrs.id === sel.slice(1)) return k;
+        else if (sel === "textarea" && k.tag === "textarea") return k;
         else if (sel.startsWith(".") && (k.attrs.class || "").split(" ").includes(sel.slice(1))) return k;
         const r = search(k);
         if (r) return r;
@@ -109,6 +121,47 @@ const localStorage = (() => { const m = new Map(); return {
   getItem: k => m.has(k) ? m.get(k) : null, setItem: (k, v) => m.set(k, v), removeItem: k => m.delete(k) };})();
 
 const storageChangeCbs = [];
+
+/* fake LLM servers for widget tests */
+let fakeSrv; // { kind: "ollama"|"lmstudio", models, replyChunks, failChat }
+function fakeFetch(url, opts = {}) {
+  const u = String(url);
+  if (!fakeSrv) return Promise.reject(new TypeError("fetch not stubbed for " + u));
+  const mkResp = (obj, ok = true) => {
+    const txt = JSON.stringify(obj);
+    return Promise.resolve({
+      ok, status: ok ? 200 : 500,
+      json: async () => obj,
+      text: async () => txt,
+      body: {
+        getReader() {
+          let lines = [];
+          if (fakeSrv.kind === "ollama") {
+            for (const c of fakeSrv.replyChunks) lines.push(JSON.stringify({ message: { content: c }, done: false }));
+            lines.push(JSON.stringify({ done: true }));
+          } else {
+            for (const c of fakeSrv.replyChunks) lines.push("data: " + JSON.stringify({ choices: [{ delta: { content: c } }] }));
+            lines.push("data: [DONE]");
+          }
+          let i = 0;
+          return {
+            read: async () => (i < lines.length
+              ? { done: false, value: new TextEncoder().encode(lines[i++] + "\n") }
+              : { done: true, value: undefined }),
+          };
+        },
+      },
+    });
+  };
+  if (fakeSrv.kind === "ollama" && u.endsWith("/api/tags")) return mkResp({ models: fakeSrv.models.map((m) => ({ name: m })) });
+  if (fakeSrv.kind === "lmstudio" && u.endsWith("/v1/models")) return mkResp({ data: fakeSrv.models.map((m) => ({ id: m })) });
+  if (u.endsWith("/api/chat") || u.endsWith("/v1/chat/completions")) {
+    if (fakeSrv.failChat) return Promise.resolve({ ok: false, status: 500, text: async () => "boom", body: null });
+    return mkResp({}); // body stream carries the reply
+  }
+  return Promise.reject(new TypeError("no fake route for " + u));
+}
+
 const chrome = {
   storage: {
     local: {
@@ -132,10 +185,11 @@ globalThis.URL.revokeObjectURL = () => {};
 const src = readFileSync(new URL("../js/app.js", import.meta.url), "utf8");
 const gates = [];
 try {
-  new Function("document", "chrome", "localStorage", "window", "FileReader", "Blob", "URL", "crypto", "setTimeout", "clearTimeout", "setInterval", "console", src)(
+  new Function("document", "chrome", "localStorage", "window", "FileReader", "Blob", "URL", "crypto", "setTimeout", "clearTimeout", "setInterval", "fetch", "TextEncoder", "TextDecoder", "AbortController", "console", src)(
     document, chrome, localStorage, { addEventListener(){} }, FakeFileReader,
     class Blob { constructor(parts) { this.parts = parts; } }, URL, crypto,
-    (fn, ms) => setTimeout(fn, Math.min(ms, 5)), clearTimeout, (fn, ms) => setInterval(fn, Math.min(ms, 5)), console);
+    (fn, ms) => setTimeout(fn, Math.min(ms, 5)), clearTimeout, (fn, ms) => setInterval(fn, Math.min(ms, 5)),
+    fakeFetch, TextEncoder, TextDecoder, AbortController, console);
 } catch (e) { gates.push("load threw: " + e.message); }
 
 document.listeners["DOMContentLoaded"][0]();
@@ -600,6 +654,84 @@ eq("countdown: label", cds[0].label, "Trip to Japan");
 eq("countdown: date", cds[0].date, "2026-12-25");
 const cdRow = cdHost.children.find(k => k.className === "cd-row");
 eq("countdown: days text rendered", /^[0-9]+d$/.test(cdRow.children[1].textContent), true);
+
+// 20. chat widget (fake streaming servers)
+byId["btn-widgets"].fire("click", { target: byId["btn-widgets"] });
+await tick();
+menuN = document.body.children[document.body.children.length - 1];
+menuN.children.find(k => k.dataset.wtype === "chat").fire("click", { target: null });
+await tick();
+let chatHost = byId["widget-board"].querySelector('.w-host[data-wtype="chat"]');
+eq("chat: setup card shown", Boolean(chatHost.querySelector('[data-role="chat-status"]')), true);
+
+// pick LM Studio provider → url prefills
+const lmsBtn = chatHost.querySelector(".chat-prov-row").children.find(b => b.dataset.prov === "lmstudio");
+lmsBtn.fire("click", { target: lmsBtn });
+await tick();
+chatHost = byId["widget-board"].querySelector('.w-host[data-wtype="chat"]');
+eq("chat: provider url prefilled", chatHost.querySelector("#chat-url").value, "http://localhost:1234");
+
+// connect to fake lmstudio
+fakeSrv = { kind: "lmstudio", models: ["qwen3-8b", "llama-3.1-8b"], replyChunks: ["Hel", "lo ", "from ", "LM Studio"] };
+chatHost.querySelector('[data-wact2="chat-connect"]').fire("click", { target: null });
+await tick(); await tick();
+eq("chat: connected config persisted", JSON.parse(localStorage.getItem("cx:chatcfg")),
+  { provider: "lmstudio", baseUrl: "http://localhost:1234", model: "qwen3-8b" });
+eq("chat: models stored", JSON.parse(localStorage.getItem("cx:chatModels")), ["qwen3-8b", "llama-3.1-8b"]);
+
+// connected UI: model select present
+chatHost = byId["widget-board"].querySelector('.w-host[data-wtype="chat"]');
+const modelSel = chatHost.querySelector(".chat-model-select");
+eq("chat: model select has options", modelSel.children.length, 2);
+
+// select second model
+modelSel.value = "llama-3.1-8b";
+modelSel.fire("change", { target: modelSel });
+await tick();
+eq("chat: model switch persisted", JSON.parse(localStorage.getItem("cx:chatcfg")).model, "llama-3.1-8b");
+
+// send message → streams reply chunks → persisted log
+const chatTa = chatHost.querySelector('[data-role="chat-input"]');
+chatTa.value = "hi there";
+chatTa.fire("keydown", { key: "Enter", target: chatTa });
+await tick(); await tick(); await tick();
+const log1 = JSON.parse(localStorage.getItem("cx:chatlog"));
+eq("chat: log has user msg", log1[0].content, "hi there");
+eq("chat: assistant streamed full reply", log1[1].content, "Hello from LM Studio");
+
+// error path: server 500
+fakeSrv = { ...fakeSrv, failChat: true };
+chatTa.value = "trigger error";
+chatTa.fire("keydown", { key: "Enter", target: chatTa });
+await tick(); await tick(); await tick();
+const log2 = JSON.parse(localStorage.getItem("cx:chatlog"));
+eq("chat: error captured in log", /error: HTTP 500/.test(log2[3].content), true);
+fakeSrv.failChat = false;
+
+// clear
+chatHost.querySelector('[data-wact2="chat-clear"]').fire("click", { target: null });
+await tick();
+eq("chat: cleared", JSON.parse(localStorage.getItem("cx:chatlog")), []);
+
+// ollama path
+fakeSrv = { kind: "ollama", models: ["llama3.2:3b"], replyChunks: ["Olla", "ma ok"] };
+chatHost.querySelector('[data-wact2="chat-disconnect"]').fire("click", { target: null });
+await tick();
+chatHost = byId["widget-board"].querySelector('.w-host[data-wtype="chat"]');
+eq("chat: back to setup after disconnect", Boolean(chatHost.querySelector('[data-role="chat-status"]')), true);
+// pick the Ollama provider chip, then connect
+chatHost.querySelector(".chat-prov-row").children.find(b => b.dataset.prov === "ollama").fire("click", { target: null });
+await tick();
+chatHost = byId["widget-board"].querySelector('.w-host[data-wtype="chat"]');
+chatHost.querySelector("#chat-url").value = "http://192.168.29.5:11434";
+chatHost.querySelector('[data-wact2="chat-connect"]').fire("click", { target: null });
+await tick(); await tick();
+eq("chat: ollama connected", JSON.parse(localStorage.getItem("cx:chatcfg")).provider, "ollama");
+const chatTa2 = byId["widget-board"].querySelector('.w-host[data-wtype="chat"]').querySelector('[data-role="chat-input"]');
+chatTa2.value = "ping";
+chatTa2.fire("keydown", { key: "Enter", target: chatTa2 });
+await tick(); await tick(); await tick();
+eq("chat: ollama ndjson stream assembled", JSON.parse(localStorage.getItem("cx:chatlog"))[1].content, "Ollama ok");
 
 // helpers
 function todayK() { const d = new Date(); return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`; }

@@ -122,6 +122,10 @@ const WIDGETS = {
     id: "pomodoro", label: "Pomodoro", icon: "🍅",
     defaults: { x: 996, y: 660, w: 300, h: 300 }, minW: 230, minH: 220,
   },
+  chat: {
+    id: "chat", label: "Chat (local LLM)", icon: "💬",
+    defaults: { x: 756, y: 920, w: 440, h: 520 }, minW: 320, minH: 320,
+  },
 };
 
 const state = {
@@ -141,6 +145,11 @@ const state = {
   mood: {}, // { "YYYY-MM-DD": 0-4 }
   pomo: { running: false, mode: "focus", endsAt: 0, sessions: [] }, // sessions: [{date, mins}]
   scratchpadId: null,
+  chatcfg: null, // { provider: "ollama"|"lmstudio", baseUrl, model }
+  chatModels: [],
+  chatlog: [], // [{role: "user"|"assistant", content}]
+  chatSetup: false,
+  chatStreaming: false,
 };
 
 const $ = (id) => document.getElementById(id);
@@ -1199,6 +1208,294 @@ function renderPomodoroWidget(host) {
   host.appendChild(frag);
 }
 
+/* ---------- chat (local LLM) ---------- */
+
+const CHAT_PROVIDERS = {
+  ollama: {
+    id: "ollama", label: "Ollama", defaultUrl: "http://localhost:11434",
+    async listModels(baseUrl) {
+      const r = await fetch(joinUrl(baseUrl, "/api/tags"));
+      if (!r.ok) throw new Error(`HTTP ${r.status}`);
+      const j = await r.json();
+      return (j.models || []).map((m) => m.name);
+    },
+    async chat(baseUrl, model, messages, onDelta, signal) {
+      const r = await fetch(joinUrl(baseUrl, "/api/chat"), {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ model, messages, stream: true }),
+        signal,
+      });
+      if (!r.ok) throw new Error(`HTTP ${r.status} ${await safeText(r)}`);
+      // NDJSON stream: {"message":{"content":"..."},"done":false} per line
+      const reader = r.body.getReader();
+      const dec = new TextDecoder();
+      let buf = "";
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buf += dec.decode(value, { stream: true });
+        let nl;
+        while ((nl = buf.indexOf("\n")) !== -1) {
+          const line = buf.slice(0, nl).trim();
+          buf = buf.slice(nl + 1);
+          if (!line) continue;
+          try {
+            const j = JSON.parse(line);
+            const piece = j.message?.content || "";
+            if (piece) onDelta(piece);
+            if (j.done) return;
+          } catch (_) { /* partial line — keep buffering */ }
+        }
+      }
+    },
+  },
+  lmstudio: {
+    id: "lmstudio", label: "LM Studio", defaultUrl: "http://localhost:1234",
+    async listModels(baseUrl) {
+      const r = await fetch(joinUrl(baseUrl, "/v1/models"));
+      if (!r.ok) throw new Error(`HTTP ${r.status}`);
+      const j = await r.json();
+      return (j.data || []).map((m) => m.id);
+    },
+    async chat(baseUrl, model, messages, onDelta, signal) {
+      const r = await fetch(joinUrl(baseUrl, "/v1/chat/completions"), {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ model, messages, stream: true }),
+        signal,
+      });
+      if (!r.ok) throw new Error(`HTTP ${r.status} ${await safeText(r)}`);
+      // SSE: lines "data: {...}"
+      const reader = r.body.getReader();
+      const dec = new TextDecoder();
+      let buf = "";
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buf += dec.decode(value, { stream: true });
+        let nl;
+        while ((nl = buf.indexOf("\n")) !== -1) {
+          const line = buf.slice(0, nl).trim();
+          buf = buf.slice(nl + 1);
+          if (!line.startsWith("data:")) continue;
+          const payload = line.slice(5).trim();
+          if (payload === "[DONE]") return;
+          try {
+            const j = JSON.parse(payload);
+            const piece = j.choices?.[0]?.delta?.content || "";
+            if (piece) onDelta(piece);
+          } catch (_) { /* partial */ }
+        }
+      }
+    },
+  },
+};
+
+function joinUrl(base, path) {
+  return base.replace(/\/+$/, "") + path;
+}
+
+async function safeText(r) {
+  try { return (await r.text()).slice(0, 200); } catch (_) { return ""; }
+}
+
+function renderChatWidget(host) {
+  host.replaceChildren();
+  const frag = document.createDocumentFragment();
+
+  if (!state.chatcfg) {
+    // setup card
+    const card = document.createElement("div");
+    card.className = "chat-setup";
+    const intro = document.createElement("div");
+    intro.className = "w-sub";
+    intro.textContent = "Connect to a local LLM server on your LAN.";
+    card.appendChild(intro);
+
+    const provRow = document.createElement("div");
+    provRow.className = "chat-prov-row";
+    for (const p of Object.values(CHAT_PROVIDERS)) {
+      const b = document.createElement("button");
+      b.className = "chat-prov-btn";
+      b.textContent = p.label;
+      b.dataset.wact2 = "chat-prov";
+      b.dataset.prov = p.id;
+      provRow.appendChild(b);
+    }
+    card.appendChild(provRow);
+
+    const urlLabel = document.createElement("label");
+    urlLabel.className = "chat-field";
+    urlLabel.append("Server URL");
+    const urlInput = document.createElement("input");
+    urlInput.type = "text";
+    urlInput.id = "chat-url";
+    urlInput.className = "chat-input";
+    urlInput.placeholder = "http://192.168.1.20:11434";
+    urlInput.value = "http://localhost:11434";
+    urlLabel.appendChild(urlInput);
+    card.appendChild(urlLabel);
+
+    const btn = document.createElement("button");
+    btn.className = "pomo-main";
+    btn.textContent = "Connect & list models";
+    btn.dataset.wact2 = "chat-connect";
+    card.appendChild(btn);
+    const status = document.createElement("div");
+    status.className = "chat-status";
+    status.dataset.role = "chat-status";
+    card.appendChild(status);
+    frag.appendChild(card);
+    host.appendChild(frag);
+    return;
+  }
+
+  // connected UI
+  const head = document.createElement("div");
+  head.className = "chat-head";
+  const prov = CHAT_PROVIDERS[state.chatcfg.provider];
+  const provEl = document.createElement("span");
+  provEl.className = "chat-prov-chip";
+  provEl.textContent = prov.label;
+  const modelSel = document.createElement("select");
+  modelSel.className = "chat-model-select";
+  modelSel.dataset.wact2 = "chat-model";
+  for (const m of state.chatModels) {
+    const opt = document.createElement("option");
+    opt.value = m;
+    opt.textContent = m;
+    if (m === state.chatcfg.model) opt.selected = true;
+    modelSel.appendChild(opt);
+  }
+  const refresh = document.createElement("button");
+  refresh.className = "pomo-ghost-btn";
+  refresh.textContent = "⟳";
+  refresh.title = "Refresh models";
+  refresh.dataset.wact2 = "chat-refresh";
+  const clear = document.createElement("button");
+  clear.className = "pomo-ghost-btn";
+  clear.textContent = "Clear";
+  clear.title = "Clear conversation";
+  clear.dataset.wact2 = "chat-clear";
+  const disc = document.createElement("button");
+  disc.className = "pomo-ghost-btn";
+  disc.textContent = "⏻";
+  disc.title = "Disconnect";
+  disc.dataset.wact2 = "chat-disconnect";
+  head.appendChild(provEl);
+  head.appendChild(modelSel);
+  head.appendChild(refresh);
+  head.appendChild(clear);
+  head.appendChild(disc);
+  frag.appendChild(head);
+
+  const log = document.createElement("div");
+  log.className = "chat-log";
+  log.dataset.role = "chat-log";
+  const histFrag = document.createDocumentFragment();
+  for (const m of state.chatlog) {
+    histFrag.appendChild(chatMsgEl(m));
+  }
+  log.appendChild(histFrag);
+  frag.appendChild(log);
+
+  const inputRow = document.createElement("div");
+  inputRow.className = "chat-input-row";
+  const ta = document.createElement("textarea");
+  ta.className = "chat-ta";
+  ta.placeholder = "Message… (Enter to send, Shift+Enter newline)";
+  ta.dataset.role = "chat-input";
+  inputRow.appendChild(ta);
+  const send = document.createElement("button");
+  send.className = "pomo-main chat-send";
+  send.textContent = "➤";
+  send.title = "Send";
+  send.dataset.wact2 = "chat-send";
+  inputRow.appendChild(send);
+  frag.appendChild(inputRow);
+  host.appendChild(frag);
+}
+
+function chatMsgEl(m) {
+  const el = document.createElement("div");
+  el.className = "chat-msg " + m.role;
+  const who = document.createElement("div");
+  who.className = "chat-who";
+  who.textContent = m.role === "user" ? "you" : "assistant";
+  const body = document.createElement("div");
+  body.className = "chat-text";
+  body.textContent = m.content;
+  el.appendChild(who);
+  el.appendChild(body);
+  return el;
+}
+
+async function chatConnect(providerId, url) {
+  const p = CHAT_PROVIDERS[providerId];
+  if (!p) return;
+  const status = hostOf("chat")?.querySelector('[data-role="chat-status"]');
+  if (status) status.textContent = `Connecting to ${url}…`;
+  try {
+    const models = await p.listModels(url);
+    if (!models.length) throw new Error("no models found — pull one first");
+    state.chatcfg = { provider: providerId, baseUrl: url, model: models[0] };
+    state.chatModels = models;
+    if (status) status.textContent = `✓ ${models.length} models`;
+    await store.set({ chatcfg: state.chatcfg, chatModels: state.chatModels });
+    renderWidgetContents();
+  } catch (e) {
+    if (status) status.textContent = `✗ ${e.message} — is the server reachable from this browser? (OLLAMA_ORIGINS may be needed)`;
+  }
+}
+
+async function chatRefreshModels() {
+  if (!state.chatcfg) return;
+  try {
+    const models = await CHAT_PROVIDERS[state.chatcfg.provider].listModels(state.chatcfg.baseUrl);
+    state.chatModels = models;
+    if (!models.includes(state.chatcfg.model)) state.chatcfg.model = models[0];
+    await store.set({ chatcfg: state.chatcfg, chatModels: models });
+    renderWidgetContents();
+  } catch (e) {
+    toast(`Model refresh failed: ${e.message}`);
+  }
+}
+
+async function chatSend(text) {
+  if (!state.chatcfg || state.chatStreaming || !text.trim()) return;
+  state.chatlog.push({ role: "user", content: text.trim() });
+  const asst = { role: "assistant", content: "" };
+  state.chatlog.push(asst);
+  state.chatStreaming = true;
+  renderWidgetContents();
+  const log = hostOf("chat")?.querySelector('[data-role="chat-log"]');
+  if (log) log.scrollTop = log.scrollHeight;
+
+  const p = CHAT_PROVIDERS[state.chatcfg.provider];
+  const ctrl = new AbortController();
+  chatAbort = ctrl;
+  try {
+    await p.chat(state.chatcfg.baseUrl, state.chatcfg.model, state.chatlog.slice(0, -1), (piece) => {
+      asst.content += piece;
+      const log2 = hostOf("chat")?.querySelector('[data-role="chat-log"]');
+      const last = log2?.lastElementChild;
+      if (last) last.querySelector(".chat-text").textContent = asst.content;
+    }, ctrl.signal);
+  } catch (e) {
+    if (e.name !== "AbortError") {
+      asst.content += asst.content ? `\n\n(error: ${e.message})` : `(error: ${e.message})`;
+    }
+  } finally {
+    state.chatStreaming = false;
+    chatAbort = null;
+    store.set({ chatlog: state.chatlog.slice(-40) });
+    renderWidgetContents();
+  }
+}
+
+let chatAbort = null;
+
 function renderWidgetContents() {
   for (const w of state.widgets) {
     const host = hostOf(w.type);
@@ -1218,6 +1515,7 @@ function renderWidgetContents() {
       case "habits": renderHabitsWidget(host); break;
       case "mood": renderMoodWidget(host); break;
       case "pomodoro": renderPomodoroWidget(host); break;
+      case "chat": renderChatWidget(host); break;
     }
   }
 }
@@ -1325,12 +1623,53 @@ function wireWidgetInteractions() {
     const act2 = e.target.dataset.wact2;
     if (act2 === "link-add") return addLinkFlow();
     if (act2 === "cd-add") return addCountdownFlow();
-    if (act2 === "habitat-add") return addHabitFlow();
     if (act2 === "habit-add") return addHabitFlow();
 
     if (act2 === "pomo-toggle") return pomoToggle();
     if (act2 === "pomo-reset") return pomoReset();
     if (act2 === "pomo-switch") return pomoSwitch();
+
+    // chat actions
+    if (act2 === "chat-prov") {
+      const p = CHAT_PROVIDERS[e.target.dataset.prov];
+      if (!p) return;
+      state.chatSetup = { provider: p.id };
+      const urlInput = hostOf("chat")?.querySelector("#chat-url");
+      if (urlInput) urlInput.value = p.defaultUrl;
+      for (const b of hostOf("chat")?.querySelectorAll?.("[data-prov]") || []) {
+        b.classList.toggle("sel", b.dataset.prov === p.id);
+      }
+      return;
+    }
+    if (act2 === "chat-connect") {
+      const urlInput = hostOf("chat")?.querySelector("#chat-url");
+      const prov = state.chatSetup?.provider || "ollama";
+      return chatConnect(prov, (urlInput?.value || "").trim());
+    }
+    if (act2 === "chat-refresh") return chatRefreshModels();
+    if (act2 === "chat-clear") {
+      state.chatlog = [];
+      store.set({ chatlog: [] });
+      renderWidgetContents();
+      return;
+    }
+    if (act2 === "chat-disconnect") {
+      chatAbort?.abort();
+      state.chatcfg = null;
+      state.chatModels = [];
+      state.chatlog = [];
+      store.set({ chatcfg: null, chatModels: [], chatlog: [] });
+      renderWidgetContents();
+      return;
+    }
+    if (act2 === "chat-send") {
+      const ta = hostOf("chat")?.querySelector('[data-role="chat-input"]');
+      if (ta) {
+        chatSend(ta.value);
+        ta.value = "";
+      }
+      return;
+    }
 
     // mood pick
     if (e.target.dataset.mood != null) {
@@ -1405,6 +1744,20 @@ function wireWidgetInteractions() {
   els.widgetBoard.addEventListener("change", (e) => {
     if (e.target.dataset.act === "ot-toggle") {
       toggleItem(e.target.dataset.noteid, e.target.dataset.itemId);
+    }
+    if (e.target.dataset.wact2 === "chat-model") {
+      state.chatcfg.model = e.target.value;
+      store.set({ chatcfg: state.chatcfg });
+    }
+  });
+
+  // chat: Enter sends, Shift+Enter newline; Esc stops streaming
+  els.widgetBoard.addEventListener("keydown", (e) => {
+    if (e.target.dataset.role === "chat-input" && e.key === "Enter" && !e.shiftKey) {
+      e.preventDefault();
+      const ta = e.target;
+      chatSend(ta.value);
+      ta.value = "";
     }
   });
 }
@@ -2015,7 +2368,8 @@ async function init() {
   setInterval(pomoTick, 1000);
 
   const data = await store.get(["notes", "theme", "seeded", "widgets",
-    "links", "countdowns", "habits", "mood", "pomo", "scratchpadId"]);
+    "links", "countdowns", "habits", "mood", "pomo", "scratchpadId",
+    "chatcfg", "chatModels", "chatlog"]);
   state.notes = migrateNotes(data.notes);
   state.theme = data.theme === "light" ? "light" : "dark";
   state.links = Array.isArray(data.links) ? data.links.filter((l) => l && typeof l.url === "string") : [];
@@ -2032,6 +2386,12 @@ async function init() {
         ...(data.pomo.remaining != null && !data.pomo.running ? { remaining: data.pomo.running ? undefined : data.pomo.remaining } : {}) }
     : { running: false, mode: "focus", endsAt: 0, sessions: [] };
   state.scratchpadId = typeof data.scratchpadId === "string" ? data.scratchpadId : null;
+  state.chatcfg = data.chatcfg && CHAT_PROVIDERS[data.chatcfg.provider] && typeof data.chatcfg.baseUrl === "string"
+    ? data.chatcfg : null;
+  state.chatModels = Array.isArray(data.chatModels) ? data.chatModels.filter((m) => typeof m === "string") : [];
+  state.chatlog = Array.isArray(data.chatlog)
+    ? data.chatlog.filter((m) => m && (m.role === "user" || m.role === "assistant") && typeof m.content === "string")
+    : [];
   state.widgets = Array.isArray(data.widgets)
     ? data.widgets.filter((w) => w && WIDGETS[w.type]).map((w) => {
         const def = WIDGETS[w.type];
