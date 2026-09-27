@@ -54,7 +54,22 @@ class Elem {
   remove() { if (this.parentNode) { const i = this.parentNode.children.indexOf(this); if (i !== -1) this.parentNode.children.splice(i, 1); this.parentNode = null; } }
   setAttribute(k, v) { this.attrs[k] = v; if (k === "id") this.attrs.id = v; }
   getAttribute(k) { return this.attrs[k]; }
-  querySelector() { return null; }
+  querySelector(sel) {
+    // minimal support: ".w-host[data-wtype=…]", "textarea", ".pomo-time"
+    const m = /^\.w-host\[data-wtype="([^"]+)"\]$/.exec(sel);
+    const search = (el) => {
+      for (const k of el.children) {
+        if (m) {
+          if ((k.attrs.class || "").split(" ").includes("w-host") && k.dataset.wtype === m[1]) return k;
+        } else if (sel === "textarea" && k.tag === "textarea") return k;
+        else if (sel.startsWith(".") && (k.attrs.class || "").split(" ").includes(sel.slice(1))) return k;
+        const r = search(k);
+        if (r) return r;
+      }
+      return null;
+    };
+    return search(this);
+  }
   contains() { return false; }
 }
 
@@ -399,6 +414,195 @@ const menu2 = document.body.children[document.body.children.length - 1];
 menu2.children.find(k => k.dataset.wtype === "calendar").fire("click", { target: null });
 await tick();
 eq("widgets: calendar re-added", widgets().filter(w => w.type === "calendar").length, 1);
+
+// 18. new widget types render from notes data
+// pin the surviving note through the app's own UI so state and storage stay in sync
+const oldCard = byId["grid"].children.find(c =>
+  findFirst(c, k => k.attrs.class === "card-title" && k._text === "old note"));
+const pinBtn = findFirst(oldCard, k => k.attrs.class === "card-actions").children[0];
+pinBtn.fire("click", { target: pinBtn });
+await tick();
+eq("pinned: note pinned via UI", notes().find(n => n.title === "old note").pinned, true);
+
+// pinned widget: click opens editor
+byId["btn-widgets"].fire("click", { target: byId["btn-widgets"] });
+await tick();
+let menuN = document.body.children[document.body.children.length - 1];
+menuN.children.find(k => k.dataset.wtype === "pinned").fire("click", { target: null });
+await tick();
+const pinnedHost = byId["widget-board"].querySelector('.w-host[data-wtype="pinned"]');
+eq("pinned: rendered welcome note row", Boolean(pinnedHost), true);
+const pinnedRow = pinnedHost.children.find(k => k.dataset.noteid);
+eq("pinned: row exists (welcome is pinned)", Boolean(pinnedRow), true);
+pinnedRow.fire("click", { target: pinnedRow });
+await tick();
+eq("pinned: click opens editor", byId["editor-backdrop"].hidden, false);
+byId["ed-done"].fire("click", { target: byId["ed-done"] });
+await tick();
+
+// recent widget
+byId["btn-widgets"].fire("click", { target: byId["btn-widgets"] });
+await tick();
+menuN = document.body.children[document.body.children.length - 1];
+menuN.children.find(k => k.dataset.wtype === "recent").fire("click", { target: null });
+await tick();
+const recentHost = byId["widget-board"].querySelector('.w-host[data-wtype="recent"]');
+eq("recent: rows rendered", recentHost.children.length, 1); // only the migrated 'old note' remains
+
+// agenda: 7 columns, today first
+byId["btn-widgets"].fire("click", { target: byId["btn-widgets"] });
+await tick();
+menuN = document.body.children[document.body.children.length - 1];
+menuN.children.find(k => k.dataset.wtype === "agenda").fire("click", { target: null });
+await tick();
+const agHost = byId["widget-board"].querySelector('.w-host[data-wtype="agenda"]');
+eq("agenda: 7 day columns", agHost.children.length, 7);
+const agToday = agHost.children[0];
+eq("agenda: first col is today", (agToday.attrs.class || "").includes("is-today"), true);
+
+// streak widget renders a number
+byId["btn-widgets"].fire("click", { target: byId["btn-widgets"] });
+await tick();
+menuN = document.body.children[document.body.children.length - 1];
+menuN.children.find(k => k.dataset.wtype === "streak").fire("click", { target: null });
+await tick();
+const stHost = byId["widget-board"].querySelector('.w-host[data-wtype="streak"]');
+eq("streak: big number rendered", stHost.children[0].className, "streak-big");
+
+// scratchpad: creates note, autosaves body
+byId["btn-widgets"].fire("click", { target: byId["btn-widgets"] });
+await tick();
+menuN = document.body.children[document.body.children.length - 1];
+menuN.children.find(k => k.dataset.wtype === "scratchpad").fire("click", { target: null });
+await tick();
+const spHost = byId["widget-board"].querySelector('.w-host[data-wtype="scratchpad"]');
+const spTa = spHost.querySelector("textarea");
+eq("scratchpad: textarea rendered", Boolean(spTa), true);
+spTa.value = "hello from scratchpad";
+spTa.fire("input", { target: spTa });
+await new Promise(r => setTimeout(r, 460)); // scratchAutosave debounce is 400ms
+const spNote = notes().find(n => n.id === JSON.parse(localStorage.getItem("cx:scratchpadId")));
+eq("scratchpad: body autosaved", spNote && spNote.body, "hello from scratchpad");
+
+// one thing: mirrors first open item of today (create a daily for today first)
+byId["quick-type"].value = "daily";
+byId["quick"].value = "focus: finish widgets";
+byId["quick"].fire("keydown", { key: "Enter" });
+await tick();
+byId["btn-widgets"].fire("click", { target: byId["btn-widgets"] });
+await tick();
+menuN = document.body.children[document.body.children.length - 1];
+menuN.children.find(k => k.dataset.wtype === "onething").fire("click", { target: null });
+await tick();
+const otHost = byId["widget-board"].querySelector('.w-host[data-wtype="onething"]');
+const otCb = otHost.querySelector(".ot-task");
+eq("onething: task rendered", Boolean(otCb), true);
+const otSpan = otCb && otCb.children.find(k => k.tag === "span");
+eq("onething: shows first open item", otSpan && otSpan.textContent, "focus: finish widgets");
+
+// stats renders 6 cells
+byId["btn-widgets"].fire("click", { target: byId["btn-widgets"] });
+await tick();
+menuN = document.body.children[document.body.children.length - 1];
+menuN.children.find(k => k.dataset.wtype === "stats").fire("click", { target: null });
+await tick();
+const statHost = byId["widget-board"].querySelector('.w-host[data-wtype="stats"]');
+eq("stats: 6 cells", statHost.children[0].children.length, 6);
+
+// 19. aux-data widgets
+// mood: pick emoji → persisted
+byId["btn-widgets"].fire("click", { target: byId["btn-widgets"] });
+await tick();
+menuN = document.body.children[document.body.children.length - 1];
+menuN.children.find(k => k.dataset.wtype === "mood").fire("click", { target: null });
+await tick();
+const moodHost = byId["widget-board"].querySelector('.w-host[data-wtype="mood"]');
+const moodBtn = moodHost.children[0].children[2]; // 😐
+moodBtn.fire("click", { target: moodBtn });
+await tick();
+eq("mood: persisted today", JSON.parse(localStorage.getItem("cx:mood"))[todayK()], 2);
+const moodStrip = moodHost.querySelector(".mood-strip");
+eq("mood: strip 28 cells", moodStrip.children.length, 28);
+eq("mood: today cell has emoji", moodStrip.children[27].textContent, "😐");
+
+// pomodoro: start → running; reset stops
+byId["btn-widgets"].fire("click", { target: byId["btn-widgets"] });
+await tick();
+menuN = document.body.children[document.body.children.length - 1];
+menuN.children.find(k => k.dataset.wtype === "pomodoro").fire("click", { target: null });
+await tick();
+const poHost = byId["widget-board"].querySelector('.w-host[data-wtype="pomodoro"]');
+eq("pomo: initial 25:00", poHost.children[0].textContent, "25:00");
+const pomoStart = poHost.querySelector(".pomo-main");
+pomoStart.fire("click", { target: pomoStart });
+await tick();
+const pomoState = JSON.parse(localStorage.getItem("cx:pomo"));
+eq("pomo: running persisted", pomoState.running, true);
+eq("pomo: endsAt in future", pomoState.endsAt > Date.now(), true);
+const pomoReset = poHost.querySelector(".pomo-ghost-btn");
+pomoReset.fire("click", { target: pomoReset });
+await tick();
+eq("pomo: reset stops", JSON.parse(localStorage.getItem("cx:pomo")).running, false);
+
+// habits: add via prompt stub, toggle a cell
+globalThis.prompt = () => "meditate";
+byId["btn-widgets"].fire("click", { target: byId["btn-widgets"] });
+await tick();
+menuN = document.body.children[document.body.children.length - 1];
+menuN.children.find(k => k.dataset.wtype === "habits").fire("click", { target: null });
+await tick();
+const hbHost = byId["widget-board"].querySelector('.w-host[data-wtype="habits"]');
+// widget rendered without habits; click + Add habit
+const hbAdd = hbHost.querySelector(".link-add");
+hbAdd.fire("click", { target: hbAdd });
+await tick();
+let habitsState = JSON.parse(localStorage.getItem("cx:habits"));
+eq("habits: added via prompt", habitsState.length, 1);
+eq("habits: name", habitsState[0].name, "meditate");
+const hbHost2 = byId["widget-board"].querySelector('.w-host[data-wtype="habits"]');
+const cell = hbHost2.children[1].children[1]; // first habit row, today cell (last col)
+cell.fire("click", { target: cell });
+await tick();
+habitsState = JSON.parse(localStorage.getItem("cx:habits"));
+eq("habits: today cell toggled on", habitsState[0].days[cell.dataset.day], true);
+eq("habits: row layout 1+14 cells", hbHost2.children[1].children.length, 15);
+
+// links + countdowns via prompt stubs
+globalThis.prompt = (msg) => msg.startsWith("Link URL") ? "github.com" : "GitHub";
+byId["btn-widgets"].fire("click", { target: byId["btn-widgets"] });
+await tick();
+menuN = document.body.children[document.body.children.length - 1];
+menuN.children.find(k => k.dataset.wtype === "links").fire("click", { target: null });
+await tick();
+const linksHost = byId["widget-board"].querySelector('.w-host[data-wtype="links"]');
+const linkAdd = linksHost.querySelector(".link-add");
+linkAdd.fire("click", { target: linkAdd });
+await tick();
+const linksState = JSON.parse(localStorage.getItem("cx:links"));
+eq("links: added + https prefix", linksState[0].url, "https://github.com");
+eq("links: title from hostname", linksState[0].title, "GitHub");
+
+// countdown
+let promptSeq = ["Trip to Japan", "2026-12-25"];
+globalThis.prompt = () => promptSeq.shift();
+byId["btn-widgets"].fire("click", { target: byId["btn-widgets"] });
+await tick();
+menuN = document.body.children[document.body.children.length - 1];
+menuN.children.find(k => k.dataset.wtype === "countdown").fire("click", { target: null });
+await tick();
+const cdHost = byId["widget-board"].querySelector('.w-host[data-wtype="countdown"]');
+const cdAdd = cdHost.querySelector(".link-add");
+cdAdd.fire("click", { target: cdAdd });
+await tick();
+const cds = JSON.parse(localStorage.getItem("cx:countdowns"));
+eq("countdown: added", cds.length, 1);
+eq("countdown: label", cds[0].label, "Trip to Japan");
+eq("countdown: date", cds[0].date, "2026-12-25");
+const cdRow = cdHost.children.find(k => k.className === "cd-row");
+eq("countdown: days text rendered", /^[0-9]+d$/.test(cdRow.children[1].textContent), true);
+
+// helpers
+function todayK() { const d = new Date(); return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`; }
 
 console.error(`\n${pass} passed, ${fail} failed${gates.length ? " — " + gates.join("; ") : ""}`);
 process.exit(fail || gates.length ? 1 : 0);
