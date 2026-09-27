@@ -1,0 +1,154 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>chat harness</title>
+  <link rel="stylesheet" href="../../css/style.css" />
+</head>
+<body data-theme="dark">
+  <div class="bg-glow" aria-hidden="true"></div>
+  <header class="topbar">
+    <div class="clock-wrap">
+      <div class="clock" id="clock">--:--</div>
+      <div class="date-line">
+        <span id="date"></span>
+        <span class="dot-sep">·</span>
+        <span id="greeting"></span>
+      </div>
+    </div>
+    <div class="top-actions">
+      <div class="search-wrap">
+        <input id="search" type="text" placeholder="Search" autocomplete="off" spellcheck="false" />
+      </div>
+      <button id="btn-theme" class="icon-btn" aria-label="theme">T</button>
+      <button id="btn-export" class="icon-btn" aria-label="export">E</button>
+      <button id="btn-import" class="icon-btn" aria-label="import">I</button>
+      <input type="file" id="file-import" hidden />
+    </div>
+  </header>
+  <main class="content">
+    <div class="quick-capture">
+      <select id="quick-type" class="quick-type"><option value="note">Note</option></select>
+      <input id="quick" type="text" />
+    </div>
+    <div class="list-head">
+      <span id="stats" class="stats"></span>
+      <div class="new-group">
+        <button id="btn-new" class="btn-new">+ Note</button>
+        <button id="btn-new-list" class="btn-new ghost">+ List</button>
+        <button id="btn-new-daily" class="btn-new ghost">+ Daily</button>
+        <button id="btn-widgets" class="btn-new ghost">Widgets</button>
+      </div>
+    </div>
+    <div id="widget-board" class="widget-board"></div>
+    <section class="today" id="today-section" hidden>
+      <div class="today-head">
+        <span class="today-label">Today</span>
+        <span class="today-date" id="today-date"></span>
+        <span class="today-progress" id="today-progress"></span>
+      </div>
+      <div id="today-cards" class="today-cards"></div>
+    </section>
+    <section class="calendar" id="calendar">
+      <div class="cal-head">
+        <span class="cal-title" id="cal-title"></span>
+        <span class="cal-nav">
+          <button id="cal-prev" class="cal-arrow">‹</button>
+          <button id="cal-today-btn" class="cal-jump">Today</button>
+          <button id="cal-next" class="cal-arrow">›</button>
+        </span>
+      </div>
+      <div class="cal-grid" id="cal-grid"></div>
+      <div class="day-panel" id="day-panel"></div>
+    </section>
+    <div id="empty" class="empty" hidden>
+      <p class="empty-title" id="empty-title"></p>
+      <p class="empty-sub" id="empty-sub"></p>
+    </div>
+    <div id="grid" class="grid"></div>
+  </main>
+  <div id="editor-backdrop" class="editor-backdrop" hidden>
+    <div class="editor" role="dialog">
+      <div class="ed-head">
+        <span id="ed-type" class="ed-type">✎</span>
+        <input id="ed-title" class="ed-title" />
+        <div class="ed-head-actions">
+          <button id="ed-pin" class="pin-btn">📌</button>
+          <button id="ed-delete" class="icon-btn danger">×</button>
+        </div>
+      </div>
+      <div class="ed-bodywrap">
+        <textarea id="ed-body" class="ed-body"></textarea>
+        <div id="ed-items" class="ed-items" hidden></div>
+        <div id="ed-add-row" class="ed-add-row" hidden>
+          <span class="add-glyph">+</span>
+          <input id="ed-new-item" type="text" />
+        </div>
+      </div>
+      <div class="ed-foot">
+        <div class="color-dots" id="color-dots"></div>
+        <input type="date" id="ed-date" class="ed-date" hidden />
+        <span id="ed-count" class="ed-count"></span>
+        <button id="ed-done" class="btn-done">Done</button>
+      </div>
+    </div>
+  </div>
+  <div id="toast" class="toast" hidden></div>
+
+  <script>
+    // pre-seed: one chat widget, connected to the real LM Studio found on LAN
+    const wid = "seed-" + Date.now();
+    localStorage.setItem("notes", JSON.stringify([]));
+    localStorage.setItem("seeded", "true");
+    localStorage.setItem("theme", JSON.stringify("dark"));
+    localStorage.setItem("widgets", JSON.stringify([
+      { id: wid, type: "chat", x: 20, y: 20, w: 440, h: 520 },
+    ]));
+    localStorage.setItem("chatcfg", JSON.stringify({
+      provider: "lmstudio",
+      baseUrl: "http://192.168.29.20:1234",
+      model: "qwen3.8-27b-turbo-fable-cold-fusion-735-882-heretic-uncensored-neo-coder-max-mtp",
+    }));
+    localStorage.setItem("chatModels", JSON.stringify([
+      "qwen3.8-27b-turbo-fable-cold-fusion-735-882-heretic-uncensored-neo-coder-max-mtp",
+    ]));
+    localStorage.setItem("chatlog", JSON.stringify([
+      { role: "user", content: "hello" },
+      { role: "assistant", content: "hi from harness" },
+    ]));
+    window.__errors = [];
+    window.addEventListener("error", (e) => {
+      window.__errors.push(String(e.message) + " @ " + (e.filename || "") + ":" + e.lineno);
+      // ALSO dump to console so --enable-logging captures it
+      console.error("PAGEERROR: " + e.message + " @" + e.lineno + ":" + e.colno);
+    });
+    window.addEventListener("unhandledrejection", (e) => {
+      console.error("UNHANDLED: " + (e.reason && e.reason.stack || e.reason));
+    });
+    setTimeout(() => {
+      const host = document.querySelector('.w-host[data-wtype="chat"]');
+      console.log("HARNESS host=" + (host ? "found" : "MISSING"));
+      if (host) {
+        const sel = host.querySelector(".chat-model-select");
+        const ta = host.querySelector('[data-role="chat-input"]');
+        console.log("HARNESS modelSel=" + (sel ? sel.children.length + " opts" : "MISSING")
+          + " ta=" + (ta ? "found" : "MISSING")
+          + " logMsgs=" + (host.querySelectorAll(".chat-msg").length));
+        // simulate sending a message to the REAL server
+        if (ta) {
+          ta.value = "Reply with exactly: harness send ok";
+          ta.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
+          console.log("HARNESS send dispatched");
+          setTimeout(() => {
+            const msgs = host.querySelectorAll(".chat-msg");
+            const last = msgs[msgs.length - 1];
+            console.log("HARNESS reply=" + JSON.stringify(last ? last.textContent.slice(0, 80) : "none"));
+            console.log("HARNESS errors=" + JSON.stringify(window.__errors));
+          }, 8000);
+        }
+      }
+    }, 1500);
+  </script>
+  <script src="../../js/app.js"></script>
+</body>
+</html>
