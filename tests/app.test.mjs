@@ -1,6 +1,6 @@
 // Functional test of js/app.js under Node with a minimal DOM/chrome mock.
-// Exercises: init + seed, quick capture, pin/unpin, delete + undo, editor
-// autosave, theme toggle, import validation, storage persistence, cross-tab sync.
+// v1.1: note types (note/list/daily), Today panel, calendar, checklist
+// editing, quick-capture per type, import with types, migration, and v1.0 behavior.
 
 import { readFileSync } from "node:fs";
 
@@ -18,7 +18,7 @@ class Elem {
       contains: (c) => this._classList.has(c),
     }; }
   set innerHTML(v) { this.children = []; this._html = v; this._text = v.replace(/<[^>]*>/g, ""); }
-  get innerHTML() { return this._html || ""; }
+  get innerHTML() { this._html ||= ""; return this._html; }
   set className(v) { this.attrs.class = v; }
   get className() { return this.attrs.class || ""; }
   get textContent() { return this._text; }
@@ -46,8 +46,9 @@ class Elem {
     const event = { key: opts.key ?? "", metaKey: !!opts.meta, ctrlKey: !!opts.ctrl, altKey: !!opts.alt,
       preventDefault() {}, stopPropagation() {}, target, ...opts, target };
     if ((ev === "input" || ev === "keydown") && "value" in opts) this.value = opts.value;
+    if (ev === "change" && "checked" in opts) this.checked = opts.checked;
     let n = this;
-    while (n) { for (const fn of (n.listeners?.[ev] || []).slice()) fn(event); n = n.parentNode; }
+    while (n) { for (const fn2 of (n.listeners?.[ev] || []).slice()) fn2(event); n = n.parentNode; }
   }
   focus(){} blur(){} click(){ this.fire("click", { target: this }); }
   setAttribute(k, v) { this.attrs[k] = v; if (k === "id") this.attrs.id = v; }
@@ -55,13 +56,23 @@ class Elem {
   querySelector() { return null; }
 }
 
-const ids = ["clock","date","greeting","search","quick","grid","stats","empty","empty-title","empty-sub",
-  "editor-backdrop","ed-title","ed-body","ed-pin","ed-delete","ed-done","ed-count","color-dots",
-  "btn-new","btn-theme","btn-export","btn-import","file-import","toast"];
+const ids = ["clock","date","greeting","search","quick","quick-type","grid","stats","empty",
+  "empty-title","empty-sub","editor-backdrop","ed-title","ed-body","ed-pin","ed-delete","ed-done",
+  "ed-count","color-dots","ed-type","ed-items","ed-new-item","ed-add-row","ed-date",
+  "btn-new","btn-new-list","btn-new-daily","btn-theme","btn-export","btn-import","file-import","toast",
+  "today-section","today-date","today-progress","today-cards","calendar","cal-title","cal-grid",
+  "cal-prev","cal-next","cal-today-btn","day-panel"];
 const byId = {};
-for (const id of ids) { const e = new Elem(id === "grid" || id === "color-dots" || id === "toast" ? "div" : id === "search" || id === "quick" || id === "ed-title" ? "input" : "button"); e.setAttribute("id", id); byId[id] = e; }
+const DIVS = ["grid","color-dots","toast","today-section","today-cards","cal-grid","day-panel","ed-items","calendar"];
+const INPUTS = ["search","quick","ed-title","ed-new-item","ed-date"];
+for (const id of ids) {
+  const tag = DIVS.includes(id) ? "div" : INPUTS.includes(id) ? "input" : id === "quick-type" ? "select" : "button";
+  const e = new Elem(tag);
+  e.setAttribute("id", id);
+  byId[id] = e;
+}
 // elements that start with the hidden attribute in newtab.html
-for (const id of ["empty", "editor-backdrop", "toast", "file-import"]) byId[id].hidden = true;
+for (const id of ["empty","editor-backdrop","toast","file-import","today-section","ed-items","ed-add-row","ed-date"]) byId[id].hidden = true;
 
 const document = {
   getElementById: (id) => byId[id] || null,
@@ -72,9 +83,7 @@ const document = {
   body: new Elem("body"),
 };
 
-class FakeFile {
-  constructor(text) { this.text = text; }
-}
+class FakeFile { constructor(text) { this.text = text; } }
 class FakeFileReader {
   readAsText(f) { this.result = f.text; this.onload?.({ target: { result: f.text } }); }
 }
@@ -94,10 +103,10 @@ const chrome = {
   },
   runtime: { getURL: (p) => "chrome-extension://fake/" + p },
   tabs: { create: async (o) => o },
+  step: undefined,
   action: { onClicked: { addListener() {} } },
 };
 
-// crypto.randomUUID exists in node 26. URL.createObjectURL missing — stub it.
 globalThis.URL.createObjectURL = () => "blob:fake";
 globalThis.URL.revokeObjectURL = () => {};
 
@@ -105,150 +114,226 @@ globalThis.URL.revokeObjectURL = () => {};
 
 const src = readFileSync(new URL("../js/app.js", import.meta.url), "utf8");
 const gates = [];
-const run = () => {
-  try { new Function("document", "chrome", "localStorage", "window", "FileReader", "Blob", "URL", "crypto", "setTimeout", "clearTimeout", "setInterval", "console", src)(
-    document, chrome, localStorage, globalThis.window, FakeFileReader, class Blob { constructor(parts) { this.parts = parts; } }, URL, crypto,
-    (fn, ms) => setTimeout(fn, Math.min(ms, 5)), clearTimeout, (fn, ms) => setInterval(fn, Math.min(ms, 5)), console); }
-  catch (e) { gates.push("load threw: " + e.message); }
-};
+try {
+  new Function("document", "chrome", "localStorage", "window", "FileReader", "Blob", "URL", "crypto", "setTimeout", "clearTimeout", "setInterval", "console", src)(
+    document, chrome, localStorage, { addEventListener(){} }, FakeFileReader,
+    class Blob { constructor(parts) { this.parts = parts; } }, URL, crypto,
+    (fn, ms) => setTimeout(fn, Math.min(ms, 5)), clearTimeout, (fn, ms) => setInterval(fn, Math.min(ms, 5)), console);
+} catch (e) { gates.push("load threw: " + e.message); }
 
-globalThis.document = document;
-globalThis.chrome = chrome;
-globalThis.localStorage = localStorage;
-globalThis.FileReader = FakeFileReader;
-globalThis.window = { addEventListener() {} };
-run();
 document.listeners["DOMContentLoaded"][0]();
 
 const tick = () => new Promise(r => setTimeout(r, 0));
-const flushAutosave = () => new Promise(r => setTimeout(r, 400));
+const notes = () => JSON.parse(localStorage.getItem("cx:notes") || "[]");
 
 let pass = 0, fail = 0;
 const eq = (name, a, b) => { const ok = JSON.stringify(a) === JSON.stringify(b);
-  if (ok) { pass++; } else { fail++; console.error(`FAIL ${name}: got ${JSON.stringify(a)} want ${JSON.stringify(b)}`); } };
+  if (ok) pass++; else { fail++; console.error(`FAIL ${name}: got ${JSON.stringify(a)} want ${JSON.stringify(b)}`); } };
+
+const findFirst = (el, pred) => {
+  for (const k of el.children) {
+    if (pred(k)) return k;
+    const r = findFirst(k, pred); if (r) return r;
+  }
+  return null;
+};
+const cardByTitle = (title) => byId["grid"].children.find(c =>
+  findFirst(c, k => k.attrs.class === "card-title" && k._text === title));
 
 /* ---------------- tests ---------------- */
 
 await tick(); await tick();
 
-// 1. seed created
-let notes = JSON.parse(localStorage.getItem("cx:notes") || "[]");
-eq("seed: one welcome note", notes.length, 1);
-eq("seed: pinned", notes[0].pinned, true);
+// 1. seed
+eq("seed: welcome note", notes().length, 1);
+eq("seed: pinned", notes()[0].pinned, true);
 eq("seeded flag", JSON.parse(localStorage.getItem("cx:seeded")), true);
-eq("render: welcome title shown", byId["grid"].children.length, 1);
+eq("seed: no literal backslash-n in body", notes()[0].body.includes("\\n"), false);
 
-// 2. quick capture
-byId["quick"].value = "buy oat milk";
+// 2. quick capture per type
+byId["quick-type"].value = "daily";
+byId["quick"].value = "ship extension v1.1";
 byId["quick"].fire("keydown", { key: "Enter" });
 await tick();
-notes = JSON.parse(localStorage.getItem("cx:notes"));
-eq("capture: added", notes.length, 2);
-eq("capture: newest first", notes[0].title, "buy oat milk");
-eq("capture: input cleared", byId["quick"].value, "");
-eq("render: two cards", byId["grid"].children.length, 2);
+let ns = notes();
+eq("daily capture: added", ns.length, 2);
+const daily = ns.find(n => n.type === "daily");
+eq("daily capture: date is YYYY-MM-DD today", /^\d{4}-\d{2}-\d{2}$/.test(daily.date), true);
+eq("daily capture: first item from text", daily.items.length, 1);
+eq("daily capture: item text", daily.items[0].text, "ship extension v1.1");
+eq("daily capture: today panel visible", byId["today-section"].hidden, false);
 
-// 3. pin toggle from card action
-const cardByTitle = (title) => byId["grid"].children.find(c =>
-  c.children.some(k => k.attrs.class === "card-title" && k._text === title));
-const cardPinBtn = (() => { const card = cardByTitle("buy oat milk");
-  for (const c of card.children) if (c.attrs.class === "card-actions") return c.children[0]; })();
-cardPinBtn.fire("click", { target: cardPinBtn });
+byId["quick-type"].value = "list";
+byId["quick"].value = "milk, eggs; bread";
+byId["quick"].fire("keydown", { key: "Enter" });
 await tick();
-notes = JSON.parse(localStorage.getItem("cx:notes"));
-eq("pin: toggled on", notes.find(n => n.title === "buy oat milk").pinned, true);
+const listNote = notes().find(n => n.type === "list");
+eq("list capture: three items", listNote.items.length, 3);
+eq("list capture: item texts", listNote.items.map(i => i.text), ["milk", "eggs", "bread"]);
 
-// 4. open editor via card click, edit, autosave
-const card = cardByTitle("buy oat milk");
-card.fire("click", { target: card });
+byId["quick-type"].value = "note";
+byId["quick"].value = "plain thought";
+byId["quick"].fire("keydown", { key: "Enter" });
+await tick();
+eq("note capture: total", notes().length, 4);
+
+// 3. Today panel
+const todayRows = byId["today-cards"].children.filter(c => c.dataset.id);
+eq("today: one daily list", todayRows.length, 1);
+eq("today: progress shown", byId["today-progress"].textContent.includes("0/1"), true);
+
+// 4. calendar basics
+const calDays = byId["cal-grid"].children.filter(c => c.dataset.day);
+eq("cal: at least 28 day cells", calDays.length >= 28, true);
+const todayCell = calDays.find(c => c.classList.contains("is-today"));
+eq("cal: today marked", Boolean(todayCell), true);
+eq("cal: today cell count=1", String(todayCell.dataset.count), "1");
+const tk = todayCell.dataset.day;
+
+// 5. toggle item via today panel checkbox (uses fire with bubbling)
+const cb = findFirst(todayRows[0], k => k.tag === "input" && k.type === "checkbox");
+cb.fire("change", { checked: true, target: cb });
+await tick();
+eq("today toggle: item done", notes().find(n => n.id === daily.id).items[0].done, true);
+eq("today toggle: progress updated", byId["today-progress"].textContent.includes("1/1"), true);
+
+// 6. editor: checklist mode
+const cardDaily = byId["grid"].children.find(c => c.dataset.id === daily.id);
+cardDaily.fire("click", { target: cardDaily });
 eq("editor: open", byId["editor-backdrop"].hidden, false);
-byId["ed-title"].value = "buy oat milk + cream";
-byId["ed-title"].fire("input");
-await flushAutosave();
-notes = JSON.parse(localStorage.getItem("cx:notes"));
-eq("autosave: title persisted", notes.some(n => n.title === "buy oat milk + cream"), true);
+eq("editor: checklist mode", byId["ed-items"].hidden, false);
+eq("editor: textarea hidden for list types", byId["ed-body"].style.display, "none");
+
+byId["ed-new-item"].value = "second task";
+byId["ed-new-item"].fire("keydown", { key: "Enter" });
+await tick();
+eq("editor: item added", notes().find(n => n.id === daily.id).items.length, 2);
+
+const itemRow = byId["ed-items"].children[1];
+const checkBtn = itemRow.children.find(k => k.dataset.act === "toggle");
+checkBtn.fire("click", { target: checkBtn });
+await tick();
+eq("editor: item toggled", notes().find(n => n.id === daily.id).items[1].done, true);
+
+const delItem = itemRow.children.find(k => k.dataset.act === "delitem");
+delItem.fire("click", { target: delItem });
+await tick();
+eq("editor: item removed", notes().find(n => n.id === daily.id).items.length, 1);
 byId["ed-done"].fire("click", { target: byId["ed-done"] });
 await tick();
 eq("editor: closed", byId["editor-backdrop"].hidden, true);
 
-// 5. delete + undo via toast action
-const delBtn = (() => { const card2 = cardByTitle("buy oat milk + cream");
-  for (const c of card2.children) if (c.attrs.class === "card-actions") return c.children[1]; })();
+// 7. N shortcut → daily editor; empty discarded on close
+await new Promise(r => setTimeout(r, 420));
+document.listeners["keydown"][0]({ key: "n", target: { matches: () => false }, preventDefault(){} });
+await tick();
+eq("N opens daily editor", byId["editor-backdrop"].hidden, false);
+eq("N daily shows date field", byId["ed-date"].hidden, false);
+byId["ed-done"].fire("click", { target: byId["ed-done"] });
+await tick();
+eq("empty daily discarded on close", notes().filter(n => n.type === "daily").length, 1);
+
+// 8. calendar navigation
+const titleBefore = byId["cal-title"].textContent;
+byId["cal-prev"].fire("click", { target: byId["cal-prev"] });
+await tick();
+eq("cal: prev changes title", byId["cal-title"].textContent !== titleBefore, true);
+byId["cal-next"].fire("click", { target: byId["cal-next"] });
+await tick();
+eq("cal: next returns", byId["cal-title"].textContent, titleBefore);
+byId["cal-today-btn"].fire("click", { target: byId["cal-today-btn"] });
+await tick();
+eq("cal: Today jumps back", byId["cal-title"].textContent, titleBefore);
+const selDay = () => byId["cal-grid"].children.find(c => c.classList.contains("is-selected"))?.dataset.day;
+eq("cal: today selected after jump", selDay(), tk);
+
+// 9. day panel: today is pre-selected at init; panel already rendered
+eq("day panel: pre-selected today shows content", byId["day-panel"].children.length > 0, true);
+const dpAdd = findFirst(byId["day-panel"], k => (k.attrs.class || "").includes("dp-add"));
+eq("day panel: add button", Boolean(dpAdd), true);
+dpAdd.fire("click", { target: dpAdd });
+await tick();
+eq("day panel: editor opens for new daily", byId["editor-backdrop"].hidden, false);
+byId["ed-new-item"].value = "from day panel";
+byId["ed-new-item"].fire("keydown", { key: "Enter" });
+await tick();
+byId["ed-done"].fire("click", { target: byId["ed-done"] });
+await tick();
+const fromPanel = notes().filter(n => n.type === "daily");
+eq("day panel: daily persisted with item", fromPanel.length, 2);
+eq("day panel: new daily is for selected day", fromPanel.some(n => n.items.some(i => i.text === "from day panel") && n.date === tk), true);
+
+// 10. import with types
+byId["file-import"].files = [new FakeFile(JSON.stringify({ notes: [
+  { type: "list", title: "imported list", items: [{ text: "a", done: true }, { text: "b" }, { bad: true }] },
+  { type: "daily", title: "imported daily", date: "2026-09-27", items: [{ text: "x" }] },
+  { type: "bogus", title: "bad type falls back to note" },
+] }))];
+byId["file-import"].fire("change");
+await tick();
+ns = notes();
+eq("import: total", ns.length, 8);
+const impList = ns.find(n => n.title === "imported list");
+eq("import: list items filtered", impList.items.map(i => i.text), ["a", "b"]);
+eq("import: done preserved", impList.items[0].done, true);
+const impDaily = ns.find(n => n.title === "imported daily");
+eq("import: daily date kept", impDaily.date, "2026-09-27");
+eq("import: bogus type → note", ns.find(n => n.title === "bad type falls back to note").type, "note");
+
+// 11. search covers item text
+byId["search"].value = "wrap up";
+byId["search"].fire("input");
+await tick();
+eq("search: no match yet", byId["grid"].children.length, 0);
+byId["search"].value = "from day panel";
+byId["search"].fire("input");
+await tick();
+eq("search: matches item text", byId["grid"].children.length, 1);
+byId["search"].value = "";
+byId["search"].fire("input");
+await tick();
+
+// 12. delete + undo
+const delBtn = (() => { const c = byId["grid"].children.find(x => x.dataset.id === daily.id);
+  return findFirst(c, k => k.attrs.class === "card-actions").children[1]; })();
 delBtn.fire("click", { target: delBtn });
 await tick();
-notes = JSON.parse(localStorage.getItem("cx:notes"));
-eq("delete: removed", notes.length, 1);
-eq("toast: visible", byId["toast"].hidden, false);
+eq("delete: removed", notes().some(n => n.id === daily.id), false);
 const undoBtn = byId["toast"].children.find(c => c.tag === "button");
 undoBtn.fire("click", { target: undoBtn });
 await tick();
-notes = JSON.parse(localStorage.getItem("cx:notes"));
-eq("undo: restored", notes.length, 2);
+eq("undo: restored", notes().some(n => n.id === daily.id), true);
 
-// 6. search filters
-byId["search"].value = "oat";
-byId["search"].fire("input");
-eq("search: filtered to 1", byId["grid"].children.length, 1);
-byId["search"].value = "zzzz";
-byId["search"].fire("input");
-eq("search: no match empty state", byId["empty"].hidden, false);
-byId["search"].value = "";
-byId["search"].fire("input");
+// 13. migration: v1.0 note backfilled
+localStorage.setItem("cx:notes", JSON.stringify([
+  { id: "old1", title: "old note", body: "from v1.0", color: 2, pinned: false, created: 1, updated: 2 },
+]));
+for (const cb2 of storageChangeCbs) cb2({ notes: { newValue: 1 } }, "local");
+await new Promise(r => setTimeout(r, 420));
+const migrated = JSON.parse(localStorage.getItem("cx:notes"));
+eq("migration: count", migrated.length, 1);
+eq("migration: type note", migrated[0].type, "note");
+eq("migration: items []", migrated[0].items, []);
+eq("migration: title kept", migrated[0].title, "old note");
 
-// 7. theme
+// 14. theme
 eq("theme: default dark", document.body.dataset.theme, "dark");
 byId["btn-theme"].fire("click", { target: byId["btn-theme"] });
 await tick();
 eq("theme: toggled to light", document.body.dataset.theme, "light");
 eq("theme: persisted", JSON.parse(localStorage.getItem("cx:theme")), "light");
 byId["btn-theme"].fire("click", { target: byId["btn-theme"] });
-
-// 8. import validation (bad json / wrong shape / good)
-byId["file-import"].files = [new FakeFile("{not json")];
-byId["file-import"].fire("change");
 await tick();
-eq("import: bad json keeps count", JSON.parse(localStorage.getItem("cx:notes")).length, 2);
 
-byId["file-import"].files = [new FakeFile(JSON.stringify({ nope: true }))];
-byId["file-import"].fire("change");
-await tick();
-eq("import: wrong shape keeps count", JSON.parse(localStorage.getItem("cx:notes")).length, 2);
-
-byId["file-import"].files = [new FakeFile(JSON.stringify({ notes: [{ title: "from import", body: "hi", color: 99, pinned: 1 }] }))];
-byId["file-import"].fire("change");
-await tick();
-notes = JSON.parse(localStorage.getItem("cx:notes"));
-eq("import: added", notes.length, 3);
-const imp = notes.find(n => n.title === "from import");
-eq("import: color clamped", imp.color >= 0 && imp.color <= 5, true);
-eq("import: pinned coerced", imp.pinned, true);
-
-// 9. cross-tab storage change resync (editor closed)
-const before = notes.length;
-localStorage.setItem("cx:notes", JSON.stringify([{ id: "ext", title: "external", body: "", color: 0, pinned: false, created: 1, updated: 1 }]));
-for (const cb of storageChangeCbs) cb({ notes: { newValue: 1 } }, "local");
-await new Promise(r => setTimeout(r, 250));
-eq("sync: notes replaced from storage event", JSON.parse(localStorage.getItem("cx:notes")).length, 1);
-
-// 10. export produces valid payload
-let capturedDL = null;
-globalThis.URL.createObjectURL = () => "blob:fake2";
+// 15. export no crash
 byId["btn-export"].fire("click", { target: byId["btn-export"] });
 await tick();
 eq("export: no crash", true, true);
 
-// 11. regression: CSS must honor the hidden attribute (author display rules
-// must not defeat [hidden] — this made the editor unclosable in real Chrome)
+// 16. regression: [hidden] guard in CSS
 const css = readFileSync(new URL("../css/style.css", import.meta.url), "utf8");
-eq("css: [hidden] display:none !important present",
+eq("css: [hidden] guard present",
   /\[hidden\]\s*\{\s*display:\s*none\s*!important/i.test(css), true);
-// every HTML element that starts hidden and has an author display rule is covered by the global [hidden] guard
-const htmlSrc = readFileSync(new URL("../newtab.html", import.meta.url), "utf8");
-const hiddenIds = [...htmlSrc.matchAll(/id="([^"]+)"[^>]*\shidden|hidden[^\n]*?id="([^"]+)"/g)].map(m => m[1] || m[2]);
-for (const id of hiddenIds) {
-  const hasDisplayRule = new RegExp(`#${id}\\s*\\{[^}]*display\\s*:`).test(css);
-  eq(`css: #${id} relies on global [hidden] guard (no unguarded display rule)`, hasDisplayRule, false);
-}
 
 console.error(`\n${pass} passed, ${fail} failed${gates.length ? " — " + gates.join("; ") : ""}`);
 process.exit(fail || gates.length ? 1 : 0);

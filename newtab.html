@@ -42,13 +42,46 @@
   <main class="content">
     <div class="quick-capture">
       <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="12" y1="5" x2="12" y2="19"></line><line x1="5" y1="12" x2="19" y2="12"></line></svg>
+      <select id="quick-type" class="quick-type" title="Note type" aria-label="Note type">
+        <option value="note">Note</option>
+        <option value="list">List</option>
+        <option value="daily">Daily todo</option>
+      </select>
       <input id="quick" type="text" placeholder="Capture a thought… press Enter to save" autocomplete="off" />
     </div>
 
     <div class="list-head">
       <span id="stats" class="stats"></span>
-      <button id="btn-new" class="btn-new">+ New note <kbd>N</kbd></button>
+      <div class="new-group">
+        <button id="btn-new" class="btn-new" title="New note">+ Note</button>
+        <button id="btn-new-list" class="btn-new ghost" title="New list">+ List</button>
+        <button id="btn-new-daily" class="btn-new ghost" title="New daily todo">+ Daily <kbd>N</kbd></button>
+      </div>
     </div>
+
+    <!-- Today's daily todos — always first on the dashboard -->
+    <section class="today" id="today-section" hidden>
+      <div class="today-head">
+        <span class="today-label">Today</span>
+        <span class="today-date" id="today-date"></span>
+        <span class="today-progress" id="today-progress"></span>
+      </div>
+      <div id="today-cards" class="today-cards"></div>
+    </section>
+
+    <!-- Calendar of daily todos -->
+    <section class="calendar" id="calendar">
+      <div class="cal-head">
+        <span class="cal-title" id="cal-title"></span>
+        <span class="cal-nav">
+          <button id="cal-prev" class="cal-arrow" title="Previous month" aria-label="Previous month">‹</button>
+          <button id="cal-today-btn" class="cal-jump" title="Jump to today">Today</button>
+          <button id="cal-next" class="cal-arrow" title="Next month" aria-label="Next month">›</button>
+        </span>
+      </div>
+      <div class="cal-grid" id="cal-grid"></div>
+      <div class="day-panel" id="day-panel"></div>
+    </section>
 
     <div id="empty" class="empty" hidden>
       <svg viewBox="0 0 24 24" width="44" height="44" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
@@ -56,7 +89,7 @@
         <path d="M18.5 2.5a2.12 2.12 0 0 1 3 3L12 15l-4 1 1-4z"></path>
       </svg>
       <p class="empty-title" id="empty-title">No notes yet</p>
-      <p class="empty-sub" id="empty-sub">Type above and hit <kbd>Enter</kbd> to capture your first note,<br/>or press <kbd>N</kbd> to write a longer one.</p>
+      <p class="empty-sub" id="empty-sub"></p>
     </div>
 
     <div id="grid" class="grid"></div>
@@ -66,6 +99,7 @@
   <div id="editor-backdrop" class="editor-backdrop" hidden>
     <div class="editor" role="dialog" aria-modal="true" aria-label="Edit note">
       <div class="ed-head">
+        <span id="ed-type" class="ed-type" title="Note type">note</span>
         <input id="ed-title" class="ed-title" placeholder="Title" maxlength="160" autocomplete="off" />
         <div class="ed-head-actions">
           <button id="ed-pin" class="pin-btn" title="Pin note" aria-pressed="false">
@@ -76,9 +110,19 @@
           </button>
         </div>
       </div>
-      <textarea id="ed-body" class="ed-body" placeholder="Start writing…"></textarea>
+
+      <div class="ed-bodywrap">
+        <textarea id="ed-body" class="ed-body" placeholder="Start writing…"></textarea>
+        <div id="ed-items" class="ed-items" hidden></div>
+        <div id="ed-add-row" class="ed-add-row" hidden>
+          <span class="add-glyph" aria-hidden="true">+</span>
+          <input id="ed-new-item" type="text" placeholder="Add item… press Enter" autocomplete="off" />
+        </div>
+      </div>
+
       <div class="ed-foot">
         <div class="color-dots" id="color-dots" title="Accent color"></div>
+        <input type="date" id="ed-date" class="ed-date" hidden aria-label="Daily todo date" />
         <span id="ed-count" class="ed-count"></span>
         <button id="ed-done" class="btn-done">Done</button>
       </div>

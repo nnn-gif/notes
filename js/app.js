@@ -51,26 +51,43 @@ const COLORS = [
   { id: 5, hex: "#a78bfa", name: "purple" },
 ];
 
+const TYPES = {
+  note:  { id: "note",  label: "Note",       glyph: "✎", hint: "plain text" },
+  list:  { id: "list",  label: "List",       glyph: "☰", hint: "checklist items" },
+  daily: { id: "daily", label: "Daily todo", glyph: "✓", hint: "checklist for a date" },
+};
+const TYPE_ORDER = ["note", "list", "daily"];
+
 const state = {
   notes: [],
   theme: "dark",
   query: "",
   editingId: null,
   hydrated: false,
+  calCursor: null, // {y, m} month shown in calendar
+  selectedDay: null, // "YYYY-MM-DD" day opened in day panel
 };
 
 const $ = (id) => document.getElementById(id);
 const els = {
   clock: $("clock"), date: $("date"), greeting: $("greeting"),
-  search: $("search"), quick: $("quick"),
+  search: $("search"), quick: $("quick"), quickType: $("quick-type"),
   grid: $("grid"), stats: $("stats"), empty: $("empty"),
   emptyTitle: $("empty-title"), emptySub: $("empty-sub"),
   backdrop: $("editor-backdrop"), edTitle: $("ed-title"), edBody: $("ed-body"),
   edPin: $("ed-pin"), edDelete: $("ed-delete"), edDone: $("ed-done"),
   edCount: $("ed-count"), colorDots: $("color-dots"),
-  btnNew: $("btn-new"), btnTheme: $("btn-theme"),
+  edType: $("ed-type"), edItems: $("ed-items"), edNewItem: $("ed-new-item"),
+  edAddRow: $("ed-add-row"), edDate: $("ed-date"),
+  btnNew: $("btn-new"), btnNewList: $("btn-new-list"), btnNewDaily: $("btn-new-daily"),
+  btnTheme: $("btn-theme"),
   btnExport: $("btn-export"), btnImport: $("btn-import"),
   fileImport: $("file-import"), toast: $("toast"),
+  todaySection: $("today-section"), todayDate: $("today-date"),
+  todayProgress: $("today-progress"), todayCards: $("today-cards"),
+  calendar: $("calendar"), calTitle: $("cal-title"), calGrid: $("cal-grid"),
+  calPrev: $("cal-prev"), calNext: $("cal-next"), calToday: $("cal-today-btn"),
+  dayPanel: $("day-panel"),
 };
 
 /* ================= helpers ================= */
@@ -86,6 +103,15 @@ const debounce = (fn, ms) => {
   };
 };
 
+const pad2 = (n) => String(n).padStart(2, "0");
+const dayKey = (d) => `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}`;
+const todayKey = () => dayKey(new Date());
+const parseKey = (key) => {
+  const [y, m, d] = key.split("-").map(Number);
+  return new Date(y, m - 1, d);
+};
+const isDailyForToday = (n) => n.type === "daily" && n.date === todayKey();
+
 function relTime(ts) {
   const diff = Date.now() - ts;
   if (diff < 60e3) return "just now";
@@ -93,6 +119,23 @@ function relTime(ts) {
   if (diff < 86400e3) return `${Math.floor(diff / 3600e3)}h ago`;
   if (diff < 7 * 86400e3) return `${Math.floor(diff / 86400e3)}d ago`;
   return new Date(ts).toLocaleDateString([], { day: "numeric", month: "short", year: "numeric" });
+}
+
+function fmtDateKey(key) {
+  return parseKey(key).toLocaleDateString([], { weekday: "short", day: "numeric", month: "short" });
+}
+
+function migrateNotes(list) {
+  return (Array.isArray(list) ? list : [])
+    .filter((n) => n && typeof n === "object")
+    .map((n) => ({
+      type: "note",
+      date: null,
+      ...n,
+      type: TYPES[n.type] ? n.type : "note",
+      items: Array.isArray(n.items) ? n.items : [],
+      date: n.type === "daily" && /^\d{4}-\d{2}-\d{2}$/.test(n.date || "") ? n.date : (n.date ?? null),
+    }));
 }
 
 function persist() {
@@ -110,15 +153,28 @@ function tick() {
     h < 5 ? "Up late?" : h < 12 ? "Good morning" : h < 17 ? "Good afternoon" : h < 22 ? "Good evening" : "Good night";
 }
 
-/* ================= rendering ================= */
+/* ================= rendering: cards ================= */
 
 function visibleNotes() {
   const q = state.query.trim().toLowerCase();
   const list = q
-    ? state.notes.filter((n) =>
-        (n.title || "").toLowerCase().includes(q) || (n.body || "").toLowerCase().includes(q))
+    ? state.notes.filter((n) => {
+        if (n.title.toLowerCase().includes(q)) return true;
+        if ((n.body || "").toLowerCase().includes(q)) return true;
+        if (Array.isArray(n.items)) return n.items.some((it) => (it.text || "").toLowerCase().includes(q));
+        return false;
+      })
     : state.notes.slice();
-  list.sort((a, b) => (b.pinned - a.pinned) || (b.updated - a.updated));
+  // pinned first, then daily-for-today, then freshest
+  list.sort((a, b) => {
+    const ap = a.pinned ? 1 : 0, bp = b.pinned ? 1 : 0;
+    if (ap !== bp) return bp - ap;
+    if (!q) {
+      const ad = isDailyForToday(a) ? 1 : 0, bd = isDailyForToday(b) ? 1 : 0;
+      if (ad !== bd) return bd - ad;
+    }
+    return b.updated - a.updated;
+  });
   return list;
 }
 
@@ -129,6 +185,12 @@ const TRASH_SVG =
 const UNPIN_SVG =
   '<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="17" x2="12" y2="22"></line><path d="M5 17h14v-1.76a2 2 0 0 0-1.11-1.79l-1.78-.9A2 2 0 0 1 15 10.76V6h1a2 2 0 0 0 0-4H8a2 2 0 0 0 0 4h1v4.76a2 2 0 0 1-1.11 1.79l-1.78.9A2 2 0 0 0 5 15.24z"></path></svg>';
 
+function itemProgress(items) {
+  const total = items.length;
+  const done = items.filter((i) => i.done).length;
+  return { total, done, pct: total ? Math.round((done / total) * 100) : 0, all: total > 0 && done === total };
+}
+
 function createCardEl(note) {
   const card = document.createElement("div");
   card.className = "card";
@@ -137,15 +199,50 @@ function createCardEl(note) {
   const color = COLORS[note.color] || COLORS[0];
   if (note.color) card.style.setProperty("--card-accent", color.hex);
 
+  const type = TYPES[note.type] || TYPES.note;
+  const typeTag = document.createElement("span");
+  typeTag.className = "type-tag" + (note.type === "daily" && isDailyForToday(note) ? " today" : "");
+  typeTag.textContent = type.glyph;
+  typeTag.title = type.label + (note.type === "daily" && note.date ? ` · ${fmtDateKey(note.date)}` : "");
+  card.appendChild(typeTag);
+
   const title = document.createElement("div");
   title.className = "card-title" + (note.title ? "" : " untitled");
-  title.textContent = note.title || "Untitled";
+  title.textContent = note.title || (note.type === "daily" ? fmtDateKey(note.date) : "Untitled");
   card.appendChild(title);
 
   const body = document.createElement("div");
   body.className = "card-body";
-  body.textContent = note.body || "";
-  if (!note.body) body.style.opacity = "0.5";
+  if (note.type === "note") {
+    body.textContent = note.body || "";
+    if (!note.body) body.style.opacity = "0.5";
+  } else if (Array.isArray(note.items)) {
+    const { done, total, all } = itemProgress(note.items);
+    if (total === 0) {
+      body.textContent = "No items yet";
+      body.style.opacity = "0.5";
+    } else {
+      const ul = document.createElement("div");
+      ul.className = "card-items";
+      for (const it of note.items.slice(0, 5)) {
+        const row = document.createElement("div");
+        row.className = "card-item" + (it.done ? " done" : "");
+        const box = document.createElement("span");
+        box.className = "mini-check" + (it.done ? " on" : "");
+        row.appendChild(box);
+        const txt = document.createElement("span");
+        txt.textContent = it.text;
+        row.appendChild(txt);
+        ul.appendChild(row);
+      }
+      const more = note.items.length - 5;
+      const summary = document.createElement("div");
+      summary.className = "item-summary";
+      summary.textContent = all ? `✓ all ${total} done` : `${done}/${total} done${more > 0 ? ` · ${more} more` : ""}`;
+      body.appendChild(ul);
+      body.appendChild(summary);
+    }
+  }
   card.appendChild(body);
 
   const meta = document.createElement("div");
@@ -158,7 +255,8 @@ function createCardEl(note) {
     meta.appendChild(pin);
   }
   const time = document.createElement("span");
-  time.textContent = relTime(note.updated);
+  time.textContent = note.type === "daily" && note.date ? fmtDateKey(note.date) : relTime(note.updated);
+  time.title = "updated " + relTime(note.updated);
   meta.appendChild(time);
   card.appendChild(meta);
 
@@ -191,8 +289,9 @@ function render() {
   const list = visibleNotes();
   const frag = document.createDocumentFragment();
   for (const n of list) frag.appendChild(createCardEl(n));
-
   els.grid.replaceChildren(frag);
+
+  renderToday();
 
   const pinnedCount = state.notes.filter((n) => n.pinned).length;
   const q = state.query.trim();
@@ -202,9 +301,8 @@ function render() {
 
   if (state.notes.length === 0) {
     els.emptyTitle.textContent = "No notes yet";
-    els.emptySub.innerHTML = "";
-    els.emptySub.append(
-      "Type above and hit ", kbd("Enter"), " to capture your first note, or press ", kbd("N"), " to write a longer one."
+    els.emptySub.replaceChildren(
+      "Capture with ", kbd("Enter"), " · press ", kbd("N"), " for a daily todo · lists and notes from the + buttons"
     );
     els.empty.hidden = false;
   } else if (list.length === 0) {
@@ -222,14 +320,203 @@ function kbd(text) {
   return k;
 }
 
+/* ================= today section ================= */
+
+function renderToday() {
+  const dailies = state.notes.filter(isDailyForToday);
+  if (dailies.length === 0) {
+    els.todaySection.hidden = true;
+    return;
+  }
+  els.todaySection.hidden = false;
+  els.todayDate.textContent = fmtDateKey(todayKey());
+  let done = 0, total = 0;
+  const frag = document.createDocumentFragment();
+  for (const n of dailies) {
+    const row = document.createElement("div");
+    row.className = "today-item";
+    row.dataset.id = n.id;
+    const head = document.createElement("div");
+    head.className = "today-item-head";
+    const label = document.createElement("span");
+    label.className = "today-item-title";
+    label.textContent = n.title || "Daily list";
+    head.appendChild(label);
+    if (Array.isArray(n.items)) {
+      const p = itemProgress(n.items);
+      done += p.done; total += p.total;
+      const badge = document.createElement("span");
+      badge.className = "today-badge" + (p.all ? " all" : "");
+      badge.textContent = p.total ? `${p.done}/${p.total}` : "empty";
+      head.appendChild(badge);
+    }
+    row.appendChild(head);
+    if (Array.isArray(n.items)) {
+      const list = document.createElement("div");
+      list.className = "today-item-list";
+      for (const it of n.items) {
+        const line = document.createElement("label");
+        line.className = "today-line" + (it.done ? " done" : "");
+        const box = document.createElement("input");
+        box.type = "checkbox";
+        box.checked = it.done;
+        box.dataset.itemId = it.id;
+        line.appendChild(box);
+        const txt = document.createElement("span");
+        txt.textContent = it.text;
+        line.appendChild(txt);
+        list.appendChild(line);
+      }
+      row.appendChild(list);
+    }
+    frag.appendChild(row);
+  }
+  els.todayCards.replaceChildren(frag);
+  els.todayProgress.textContent = total ? `${done}/${total} done` : "";
+}
+
+/* ================= calendar ================= */
+
+const DAY_LABELS = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
+
+function renderCalendar() {
+  const now = new Date();
+  const cursor = state.calCursor || { y: now.getFullYear(), m: now.getMonth() };
+  state.calCursor = cursor;
+  els.calTitle.textContent = new Date(cursor.y, cursor.m, 1)
+    .toLocaleDateString([], { month: "long", year: "numeric" });
+
+  const dailiesByDay = new Map();
+  for (const n of state.notes) {
+    if (n.type === "daily" && n.date) {
+      const arr = dailiesByDay.get(n.date) || [];
+      arr.push(n);
+      dailiesByDay.set(n.date, arr);
+    }
+  }
+
+  const frag = document.createDocumentFragment();
+  for (const lbl of DAY_LABELS) {
+    const h = document.createElement("div");
+    h.className = "cal-dow";
+    h.textContent = lbl;
+    frag.appendChild(h);
+  }
+
+  const first = new Date(cursor.y, cursor.m, 1);
+  const startOffset = (first.getDay() + 6) % 7; // Monday-first
+  const daysInMonth = new Date(cursor.y, cursor.m + 1, 0).getDate();
+  const tk = todayKey();
+
+  for (let i = 0; i < startOffset; i++) {
+    frag.appendChild(document.createElement("div"));
+  }
+  for (let day = 1; day <= daysInMonth; day++) {
+    const key = `${cursor.y}-${pad2(cursor.m + 1)}-${pad2(day)}`;
+    const cell = document.createElement("button");
+    cell.className = "cal-day";
+    cell.dataset.day = key;
+    cell.dataset.count = dailiesByDay.get(key)?.length || 0;
+    if (key === tk) cell.classList.add("is-today");
+    if (state.selectedDay === key) cell.classList.add("is-selected");
+    cell.innerHTML = `<span class="cal-num">${day}</span>`;
+    const dayNotes = dailiesByDay.get(key) || [];
+    let done = 0, total = 0;
+    for (const n of dayNotes) {
+      if (Array.isArray(n.items)) {
+        const p = itemProgress(n.items);
+        done += p.done; total += p.total;
+      }
+    }
+    if (total > 0) {
+      const bar = document.createElement("span");
+      bar.className = "cal-bar";
+      bar.style.setProperty("--p", `${(done / total) * 100}%`);
+      if (done === total) bar.classList.add("all");
+      cell.appendChild(bar);
+      cell.title = `${done}/${total} done`;
+    }
+    frag.appendChild(cell);
+  }
+  els.calGrid.replaceChildren(frag);
+
+  if (state.selectedDay) renderDayPanel(state.selectedDay);
+  else els.dayPanel.replaceChildren();
+}
+
+function renderDayPanel(key) {
+  const dayNotes = state.notes.filter((n) => n.type === "daily" && n.date === key);
+  const frag = document.createDocumentFragment();
+  const title = document.createElement("div");
+  title.className = "dp-title";
+  title.textContent = fmtDateKey(key);
+  frag.appendChild(title);
+
+  if (dayNotes.length === 0) {
+    const emptyMsg = document.createElement("div");
+    emptyMsg.className = "dp-empty";
+    emptyMsg.textContent = "No daily todos for this day.";
+    const add = document.createElement("button");
+    add.className = "dp-add";
+    add.textContent = "+ Add daily todo for this day";
+    add.dataset.day = key;
+    emptyMsg.appendChild(document.createElement("br"));
+    emptyMsg.appendChild(add);
+    frag.appendChild(emptyMsg);
+  } else {
+    for (const n of dayNotes) {
+      const box = document.createElement("div");
+      box.className = "dp-note";
+      box.dataset.id = n.id;
+      const head = document.createElement("div");
+      head.className = "dp-note-head";
+      const label = document.createElement("span");
+      label.className = "dp-note-title";
+      label.textContent = n.title || "Daily list";
+      head.appendChild(label);
+      if (Array.isArray(n.items) && n.items.length) {
+        const p = itemProgress(n.items);
+        const badge = document.createElement("span");
+        badge.className = "today-badge" + (p.all ? " all" : "");
+        badge.textContent = `${p.done}/${p.total}`;
+        head.appendChild(badge);
+      }
+      box.appendChild(head);
+      for (const it of n.items || []) {
+        const line = document.createElement("label");
+        line.className = "today-line" + (it.done ? " done" : "");
+        const cb = document.createElement("input");
+        cb.type = "checkbox";
+        cb.checked = it.done;
+        cb.dataset.itemId = it.id;
+        line.appendChild(cb);
+        const txt = document.createElement("span");
+        txt.textContent = it.text;
+        line.appendChild(txt);
+        box.appendChild(line);
+      }
+      frag.appendChild(box);
+    }
+    const add = document.createElement("button");
+    add.className = "dp-add";
+    add.textContent = "+ Add another for this day";
+    add.dataset.day = key;
+    frag.appendChild(add);
+  }
+  els.dayPanel.replaceChildren(frag);
+}
+
 /* ================= CRUD ================= */
 
 function makeNote(partial = {}) {
   const now = Date.now();
   return {
     id: uid(),
+    type: "note",
     title: "",
     body: "",
+    items: [],
+    date: null,
     color: 0,
     pinned: false,
     created: now,
@@ -238,18 +525,38 @@ function makeNote(partial = {}) {
   };
 }
 
+function makeItem(text) {
+  return { id: uid(), text, done: false };
+}
+
+function touch(n) { n.updated = Date.now(); }
+
 function quickCapture() {
   const text = els.quick.value.trim();
   if (!text) return;
-  const title = text.length <= 80 ? text : text.slice(0, 80);
-  const body = text.length <= 80 ? "" : text;
-  state.notes.unshift(makeNote({ title, body }));
+  const type = TYPE_ORDER.includes(els.quickType.value) ? els.quickType.value : "note";
+  const partial = { type };
+  if (type === "daily") {
+    partial.date = todayKey();
+    partial.title = text.slice(0, 80);
+    partial.items = [makeItem(text)];
+  } else if (type === "list") {
+    partial.title = "List";
+    partial.items = text.split(/\s*[,;]\s*|\n/).filter(Boolean).map(makeItem);
+  } else {
+    partial.title = text.length <= 80 ? text : text.slice(0, 80);
+    partial.body = text.length <= 80 ? "" : text;
+  }
+  state.notes.unshift(makeNote(partial));
   els.quick.value = "";
-  persist().then(render);
+  persist().then(renderAll);
 }
 
-function newNote() {
-  const note = makeNote();
+function newNote(type = "note", date = null) {
+  const t = TYPES[type] ? type : "note";
+  const note = makeNote({ type: t });
+  if (t === "daily") note.date = date || todayKey();
+  if (t === "list") note.title = "List";
   state.notes.unshift(note);
   openEditor(note.id);
 }
@@ -258,8 +565,8 @@ function togglePin(id) {
   const n = state.notes.find((x) => x.id === id);
   if (!n) return;
   n.pinned = !n.pinned;
-  n.updated = Date.now();
-  persist().then(render);
+  touch(n);
+  persist().then(renderAll);
 }
 
 let lastDeleted = null;
@@ -270,13 +577,23 @@ function deleteNote(id) {
   lastDeleted = { note: state.notes[idx], index: idx };
   state.notes.splice(idx, 1);
   if (state.editingId === id) hideEditor(false);
-  persist().then(render);
+  persist().then(renderAll);
   toast(`Note deleted`, "Undo", () => {
     if (!lastDeleted) return;
     state.notes.splice(Math.min(lastDeleted.index, state.notes.length), 0, lastDeleted.note);
     lastDeleted = null;
-    persist().then(render);
+    persist().then(renderAll);
   });
+}
+
+function toggleItem(noteId, itemId) {
+  const n = state.notes.find((x) => x.id === noteId);
+  if (!n || !Array.isArray(n.items)) return;
+  const it = n.items.find((i) => i.id === itemId);
+  if (!it) return;
+  it.done = !it.done;
+  touch(n);
+  persist().then(renderAll);
 }
 
 /* ================= editor ================= */
@@ -295,7 +612,7 @@ function buildColorDots() {
       if (!n) return;
       n.color = c.id;
       syncEditorChrome(n);
-      persist().then(render);
+      persist().then(renderAll);
     });
     els.colorDots.appendChild(b);
   }
@@ -306,8 +623,56 @@ function syncEditorChrome(note) {
   for (const dot of els.colorDots.children) {
     dot.classList.toggle("selected", Number(dot.dataset.color) === note.color);
   }
+  const t = TYPES[note.type] || TYPES.note;
+  els.edType.textContent = t.glyph;
+  els.edType.title = t.label;
   const words = (els.edBody.value.trim().match(/\S+/g) || []).length;
-  els.edCount.textContent = `${words} word${words === 1 ? "" : "s"} · ${els.edBody.value.length} chars · saved automatically`;
+  const items = Array.isArray(note.items) ? note.items.length : 0;
+  const itemBits = items ? ` · ${items} item${items === 1 ? "" : "s"}` : "";
+  els.edCount.textContent = `${words} word${words === 1 ? "" : "s"}${itemBits} · saved automatically`;
+}
+
+function renderEditorItems(note) {
+  if (note.type === "note") {
+    els.edItems.hidden = true;
+    els.edAddRow.hidden = true;
+    els.edBody.style.display = "";
+    return;
+  }
+  els.edBody.style.display = "none";
+  els.edItems.hidden = false;
+  els.edAddRow.hidden = false;
+  const frag = document.createDocumentFragment();
+  for (const it of note.items || []) {
+    const row = document.createElement("div");
+    row.className = "ed-item" + (it.done ? " done" : "");
+    row.dataset.itemId = it.id;
+
+    const check = document.createElement("button");
+    check.className = "item-check" + (it.done ? " on" : "");
+    check.dataset.act = "toggle";
+    check.title = it.done ? "Mark undone" : "Mark done";
+    row.appendChild(check);
+
+    const input = document.createElement("input");
+    input.type = "text";
+    input.value = it.text;
+    input.dataset.act = "edit";
+    input.placeholder = "Item";
+    row.appendChild(input);
+
+    const del = document.createElement("button");
+    del.className = "item-del";
+    del.dataset.act = "delitem";
+    del.title = "Remove item";
+    del.textContent = "×";
+    row.appendChild(del);
+
+    frag.appendChild(row);
+  }
+  els.edItems.replaceChildren(frag);
+  els.edDate.hidden = note.type !== "daily";
+  if (note.type === "daily" && note.date) els.edDate.value = note.date;
 }
 
 function openEditor(id) {
@@ -315,30 +680,33 @@ function openEditor(id) {
   if (!n) return;
   state.editingId = id;
   els.edTitle.value = n.title;
-  els.edBody.value = n.body;
+  els.edBody.value = n.body || "";
+  renderEditorItems(n);
   syncEditorChrome(n);
   els.backdrop.hidden = false;
   document.body.style.overflow = "hidden";
-  (n.title ? els.edBody : els.edTitle).focus();
+  if (n.type === "note") (n.title ? els.edBody : els.edTitle).focus();
+  else els.edNewItem.focus();
 }
 
 const editorAutosave = debounce(() => {
   const n = state.notes.find((x) => x.id === state.editingId);
   if (!n) return;
   n.title = els.edTitle.value;
-  n.body = els.edBody.value;
-  n.updated = Date.now();
+  if (n.type === "note") n.body = els.edBody.value;
+  touch(n);
   syncEditorChrome(n);
-  persist().then(render);
+  persist().then(renderAll);
 }, 350);
 
 function hideEditor(save = true) {
   const n = state.notes.find((x) => x.id === state.editingId);
   if (n && save) {
     n.title = els.edTitle.value.trim();
-    n.body = els.edBody.value;
-    n.updated = Date.now();
-    if (!n.title && !n.body.trim()) {
+    if (n.type === "note") n.body = els.edBody.value;
+    touch(n);
+    const emptyBody = n.type === "note" ? !n.body.trim() : !(n.items || []).length && !n.title;
+    if (!n.title && emptyBody) {
       const idx = state.notes.indexOf(n);
       if (idx !== -1) state.notes.splice(idx, 1);
     }
@@ -346,7 +714,7 @@ function hideEditor(save = true) {
   state.editingId = null;
   els.backdrop.hidden = true;
   document.body.style.overflow = "";
-  persist().then(render);
+  persist().then(renderAll);
 }
 
 /* ================= theme / export / import ================= */
@@ -368,7 +736,7 @@ function exportJSON() {
   const a = document.createElement("a");
   const d = new Date();
   a.href = url;
-  a.download = `notes-backup-${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}.json`;
+  a.download = `notes-backup-${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}.json`;
   a.click();
   URL.revokeObjectURL(url);
   toast(`Exported ${state.notes.length} note${state.notes.length === 1 ? "" : "s"}`);
@@ -382,16 +750,29 @@ function importJSON(file) {
     const incoming = Array.isArray(parsed) ? parsed : Array.isArray(parsed?.notes) ? parsed.notes : null;
     if (!incoming) { toast("Import failed: expected an array of notes"); return; }
     const now = Date.now();
-    const cleaned = incoming.map((raw) => makeNote({
-      title: typeof raw?.title === "string" ? raw.title.slice(0, 500) : "",
-      body: typeof raw?.body === "string" ? raw.body : "",
-      color: Number.isInteger(raw?.color) ? Math.min(Math.max(raw.color, 0), COLORS.length - 1) : 0,
-      pinned: Boolean(raw?.pinned),
-      created: Number.isFinite(raw?.created) ? raw.created : now,
-      updated: Number.isFinite(raw?.updated) ? raw.updated : now,
-    }));
+    const cleaned = incoming.map((raw) => {
+      const type = TYPES[raw?.type] ? raw.type : "note";
+      const items = Array.isArray(raw?.items)
+        ? raw.items.filter((i) => i && typeof i.text === "string").map((i) => ({
+            id: typeof i.id === "string" ? i.id : uid(),
+            text: i.text.slice(0, 2000),
+            done: Boolean(i.done),
+          }))
+        : [];
+      return makeNote({
+        type,
+        title: typeof raw?.title === "string" ? raw.title.slice(0, 500) : "",
+        body: typeof raw?.body === "string" ? raw.body : "",
+        items: type === "note" ? [] : items,
+        date: type === "daily" && /^\d{4}-\d{2}-\d{2}$/.test(raw?.date || "") ? raw.date : null,
+        color: Number.isInteger(raw?.color) ? Math.min(Math.max(raw.color, 0), COLORS.length - 1) : 0,
+        pinned: Boolean(raw?.pinned),
+        created: Number.isFinite(raw?.created) ? raw.created : now,
+        updated: Number.isFinite(raw?.updated) ? raw.updated : now,
+      });
+    });
     state.notes = [...cleaned, ...state.notes];
-    persist().then(render);
+    persist().then(renderAll);
     toast(`Imported ${cleaned.length} note${cleaned.length === 1 ? "" : "s"}`);
   };
   reader.readAsText(file);
@@ -423,7 +804,9 @@ function wireEvents() {
     if (e.key === "Escape") els.quick.blur();
   });
 
-  els.btnNew.addEventListener("click", newNote);
+  els.btnNew.addEventListener("click", () => newNote("note"));
+  els.btnNewList.addEventListener("click", () => newNote("list"));
+  els.btnNewDaily.addEventListener("click", () => newNote("daily"));
 
   els.search.addEventListener("input", () => {
     state.query = els.search.value;
@@ -438,6 +821,44 @@ function wireEvents() {
     if (btn?.dataset.act === "pin") togglePin(id);
     else if (btn?.dataset.act === "del") deleteNote(id);
     else openEditor(id);
+  });
+
+  // today section checkbox toggles
+  els.todayCards.addEventListener("change", (e) => {
+    const row = e.target.closest("[data-id]");
+    if (!row || e.target.type !== "checkbox") return;
+    toggleItem(row.dataset.id, e.target.dataset.itemId);
+  });
+
+  // calendar navigation
+  els.calPrev.addEventListener("click", () => shiftMonth(-1));
+  els.calNext.addEventListener("click", () => shiftMonth(1));
+  els.calToday.addEventListener("click", () => {
+    const now = new Date();
+    state.calCursor = { y: now.getFullYear(), m: now.getMonth() };
+    state.selectedDay = todayKey();
+    renderCalendar();
+  });
+  els.calGrid.addEventListener("click", (e) => {
+    const cell = e.target.closest("[data-day]");
+    if (!cell) return;
+    const key = cell.dataset.day;
+    state.selectedDay = state.selectedDay === key ? null : key;
+    renderCalendar();
+  });
+  els.dayPanel.addEventListener("click", (e) => {
+    if (e.target.dataset.day) {
+      newNote("daily", e.target.dataset.day);
+      return;
+    }
+    const box = e.target.closest("[data-id]");
+    if (box && e.target.type === "checkbox") return; // handled by change
+    if (box && !e.target.closest("[data-act]")) openEditor(box.dataset.id);
+  });
+  els.dayPanel.addEventListener("change", (e) => {
+    const box = e.target.closest("[data-id]");
+    if (!box || e.target.type !== "checkbox") return;
+    toggleItem(box.dataset.id, e.target.dataset.itemId);
   });
 
   // editor
@@ -457,6 +878,56 @@ function wireEvents() {
   els.edBody.addEventListener("keydown", (e) => {
     if ((e.metaKey || e.ctrlKey) && e.key === "Enter") hideEditor(true);
   });
+  els.edDate.addEventListener("change", () => {
+    const n = state.notes.find((x) => x.id === state.editingId);
+    if (!n || n.type !== "daily") return;
+    n.date = els.edDate.value || todayKey();
+    touch(n);
+    persist().then(renderAll);
+  });
+
+  // checklist editing inside editor
+  els.edItems.addEventListener("click", (e) => {
+    const row = e.target.closest("[data-item-id]");
+    if (!row) return;
+    const n = state.notes.find((x) => x.id === state.editingId);
+    if (!n) return;
+    const it = (n.items || []).find((i) => i.id === row.dataset.itemId);
+    if (!it) return;
+    const act = e.target.dataset.act;
+    if (act === "toggle") {
+      it.done = !it.done;
+      touch(n);
+      persist().then(() => { renderEditorItems(n); renderAll(); });
+    } else if (act === "delitem") {
+      n.items = n.items.filter((i) => i.id !== it.id);
+      touch(n);
+      persist().then(() => { renderEditorItems(n); renderAll(); });
+    }
+  });
+  els.edItems.addEventListener("input", (e) => {
+    if (e.target.dataset.act !== "edit") return;
+    const row = e.target.closest("[data-item-id]");
+    const n = state.notes.find((x) => x.id === state.editingId);
+    if (!n || !row) return;
+    const it = (n.items || []).find((i) => i.id === row.dataset.itemId);
+    if (!it) return;
+    it.text = e.target.value;
+    touch(n);
+    itemAutosave();
+  });
+  els.edNewItem.addEventListener("keydown", (e) => {
+    if (e.key !== "Enter") return;
+    const text = els.edNewItem.value.trim();
+    if (!text) return;
+    const n = state.notes.find((x) => x.id === state.editingId);
+    if (!n) return;
+    n.items = [...(n.items || []), makeItem(text)];
+    touch(n);
+    els.edNewItem.value = "";
+    persist().then(() => { renderEditorItems(n); renderAll(); });
+    els.edNewItem.focus();
+  });
 
   // header actions
   els.btnTheme.addEventListener("click", toggleTheme);
@@ -470,7 +941,7 @@ function wireEvents() {
 
   // global shortcuts
   document.addEventListener("keydown", (e) => {
-    const typing = e.target.matches("input, textarea");
+    const typing = e.target.matches("input, textarea, select");
     if (e.key === "Escape") {
       if (!els.backdrop.hidden) hideEditor(true);
       else if (typing) e.target.blur();
@@ -478,17 +949,38 @@ function wireEvents() {
     }
     if (typing || e.metaKey || e.ctrlKey || e.altKey) return;
     if (e.key === "/") { e.preventDefault(); els.search.focus(); }
-    else if (e.key.toLowerCase() === "n") { e.preventDefault(); newNote(); }
+    else if (e.key.toLowerCase() === "n") { e.preventDefault(); newNote("daily"); }
   });
 
   // external changes (other windows/tabs)
   store.onChanged(debounce(async () => {
     if (state.editingId) return; // don't clobber an open editor
     const data = await store.get(["notes", "theme"]);
-    if (Array.isArray(data.notes)) state.notes = data.notes;
+    if (Array.isArray(data.notes)) {
+      const migrated = migrateNotes(data.notes);
+      const changed = JSON.stringify(migrated) !== JSON.stringify(data.notes);
+      state.notes = migrated;
+      if (changed) persist(); // normalize in storage too
+    }
     if (data.theme === "light" || data.theme === "dark") { state.theme = data.theme; applyTheme(); }
-    render();
+    renderAll();
   }, 200));
+}
+
+const itemAutosave = debounce(() => {
+  persist().then(renderAll);
+}, 350);
+
+function shiftMonth(delta) {
+  const c = state.calCursor || (() => { const n = new Date(); return { y: n.getFullYear(), m: n.getMonth() }; })();
+  const d = new Date(c.y, c.m + delta, 1);
+  state.calCursor = { y: d.getFullYear(), m: d.getMonth() };
+  renderCalendar();
+}
+
+function renderAll() {
+  render();
+  renderCalendar();
 }
 
 /* ================= init ================= */
@@ -500,18 +992,19 @@ async function init() {
   setInterval(tick, 1000);
 
   const data = await store.get(["notes", "theme", "seeded"]);
-  state.notes = Array.isArray(data.notes) ? data.notes : [];
+  state.notes = migrateNotes(data.notes);
   state.theme = data.theme === "light" ? "light" : "dark";
 
   if (!data.seeded && state.notes.length === 0) {
+    const now = new Date();
     state.notes = [makeNote({
       title: "Welcome to Notes 🎉",
       body:
         "This page replaces your Chrome new tab — every new tab is now a notepad.\n\n" +
-        "· Type in the capture bar and press Enter for an instant note\n" +
-        "· Press N to write a longer note, / to search\n" +
+        "· Three types: Note (text), List (checklist), Daily todo (per-day checklist)\n" +
+        "· Daily todos for today sit in the Today panel at the top and on the calendar\n" +
+        "· Press N for a new daily todo, / to search\n" +
         "· Pin what matters — pinned notes stay on top\n" +
-        "· Color-code notes from the editor\n" +
         "· Everything is stored locally in your browser (chrome.storage)\n" +
         "· Export a JSON backup anytime from the top-right icons\n\n" +
         "Delete this note whenever you're ready. Happy noting!",
@@ -523,7 +1016,8 @@ async function init() {
 
   state.hydrated = true;
   applyTheme();
-  render();
+  state.selectedDay = todayKey();
+  renderAll();
   els.quick.focus();
 }
 
