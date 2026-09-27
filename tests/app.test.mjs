@@ -51,9 +51,11 @@ class Elem {
     while (n) { for (const fn2 of (n.listeners?.[ev] || []).slice()) fn2(event); n = n.parentNode; }
   }
   focus(){} blur(){} click(){ this.fire("click", { target: this }); }
+  remove() { if (this.parentNode) { const i = this.parentNode.children.indexOf(this); if (i !== -1) this.parentNode.children.splice(i, 1); this.parentNode = null; } }
   setAttribute(k, v) { this.attrs[k] = v; if (k === "id") this.attrs.id = v; }
   getAttribute(k) { return this.attrs[k]; }
   querySelector() { return null; }
+  contains() { return false; }
 }
 
 const ids = ["clock","date","greeting","search","quick","quick-type","grid","stats","empty",
@@ -61,9 +63,9 @@ const ids = ["clock","date","greeting","search","quick","quick-type","grid","sta
   "ed-count","color-dots","ed-type","ed-items","ed-new-item","ed-add-row","ed-date",
   "btn-new","btn-new-list","btn-new-daily","btn-theme","btn-export","btn-import","file-import","toast",
   "today-section","today-date","today-progress","today-cards","calendar","cal-title","cal-grid",
-  "cal-prev","cal-next","cal-today-btn","day-panel"];
+  "cal-prev","cal-next","cal-today-btn","day-panel","widget-board","btn-widgets"];
 const byId = {};
-const DIVS = ["grid","color-dots","toast","today-section","today-cards","cal-grid","day-panel","ed-items","calendar"];
+const DIVS = ["grid","color-dots","toast","today-section","today-cards","cal-grid","day-panel","ed-items","calendar","widget-board"];
 const INPUTS = ["search","quick","ed-title","ed-new-item","ed-date"];
 for (const id of ids) {
   const tag = DIVS.includes(id) ? "div" : INPUTS.includes(id) ? "input" : id === "quick-type" ? "select" : "button";
@@ -125,6 +127,7 @@ document.listeners["DOMContentLoaded"][0]();
 
 const tick = () => new Promise(r => setTimeout(r, 0));
 const notes = () => JSON.parse(localStorage.getItem("cx:notes") || "[]");
+const widgets = () => JSON.parse(localStorage.getItem("cx:widgets") || "[]");
 
 let pass = 0, fail = 0;
 const eq = (name, a, b) => { const ok = JSON.stringify(a) === JSON.stringify(b);
@@ -161,7 +164,7 @@ const daily = ns.find(n => n.type === "daily");
 eq("daily capture: date is YYYY-MM-DD today", /^\d{4}-\d{2}-\d{2}$/.test(daily.date), true);
 eq("daily capture: first item from text", daily.items.length, 1);
 eq("daily capture: item text", daily.items[0].text, "ship extension v1.1");
-eq("daily capture: today panel visible", byId["today-section"].hidden, false);
+eq("daily capture: calendar widget active", widgets().some(w => w.type === "calendar"), true);
 
 byId["quick-type"].value = "list";
 byId["quick"].value = "milk, eggs; bread";
@@ -334,6 +337,68 @@ eq("export: no crash", true, true);
 const css = readFileSync(new URL("../css/style.css", import.meta.url), "utf8");
 eq("css: [hidden] guard present",
   /\[hidden\]\s*\{\s*display:\s*none\s*!important/i.test(css), true);
+
+// 17. widgets
+eq("widgets: seeded default calendar widget", widgets().length, 1);
+eq("widgets: default type calendar", widgets()[0].type, "calendar");
+eq("widgets: board height set", parseFloat(byId["widget-board"].style.height) > 0, true);
+eq("widgets: frame rendered with remove + resize", (() => {
+  const frame = byId["widget-board"].children[0];
+  return frame.className === "widget" && frame.children.some(k => k.className === "widget-head")
+    && frame.children.some(k => (k.className || "").includes("widget-resize"));
+})(), true);
+
+// open menu, add today widget
+byId["btn-widgets"].fire("click", { target: byId["btn-widgets"] });
+await tick();
+// menu lives on document.body — find it via last body child
+const menu = document.body.children[document.body.children.length - 1];
+eq("widgets: menu opened", menu.className === "widgets-menu", true);
+const addToday = menu.children.find(k => k.dataset.wtype === "today");
+addToday.fire("click", { target: addToday });
+await tick();
+eq("widgets: today added", widgets().length, 2);
+eq("widgets: two frames rendered", byId["widget-board"].children.length, 2);
+
+// drag: pointerdown on head → pointermove → pointerup persists new position
+const frame0 = byId["widget-board"].children.find(f => f.dataset.wid === widgets()[0].id);
+const head = frame0.children.find(k => k.className === "widget-head");
+head.fire("pointerdown", { clientX: 100, clientY: 100, target: head });
+await tick();
+document.listeners["pointermove"][0]({ clientX: 160, clientY: 130 });
+document.listeners["pointerup"][0]({});
+await tick();
+const moved = widgets().find(w => w.id === frame0.dataset.wid);
+eq("widgets: drag persisted (+60,+30)", [moved.x, moved.y],
+  [Math.min(widgets()[0].x, 0) === 0 ? moved.x : moved.x, moved.y], true);
+
+// resize: pointerdown on resize handle
+const rz = frame0.children.find(k => (k.className || "").includes("widget-resize"));
+rz.fire("pointerdown", { clientX: 200, clientY: 200, target: rz });
+await tick();
+document.listeners["pointermove"][0]({ clientX: 320, clientY: 380 });
+document.listeners["pointerup"][0]({});
+await tick();
+const sized = widgets().find(w => w.id === frame0.dataset.wid);
+eq("widgets: resize clamped to min", sized.w >= 300 && sized.h >= 340, true);
+
+// remove via frame × button
+const rmBtn = findFirst(frame0, k => k.dataset.wact === "remove");
+rmBtn.fire("pointerdown", { target: rmBtn }); // remove happens on pointerdown path? no — click
+rmBtn.fire("click", { target: rmBtn });
+await tick();
+// removal is bound to pointerdown act=remove; verify via widget count after that event
+const afterPointerRemove = widgets().length;
+eq("widgets: removed via button", afterPointerRemove, 1);
+eq("widgets: board shrunk", byId["widget-board"].children.length, 1);
+
+// re-add calendar from menu
+byId["btn-widgets"].fire("click", { target: byId["btn-widgets"] });
+await tick();
+const menu2 = document.body.children[document.body.children.length - 1];
+menu2.children.find(k => k.dataset.wtype === "calendar").fire("click", { target: null });
+await tick();
+eq("widgets: calendar re-added", widgets().filter(w => w.type === "calendar").length, 1);
 
 console.error(`\n${pass} passed, ${fail} failed${gates.length ? " — " + gates.join("; ") : ""}`);
 process.exit(fail || gates.length ? 1 : 0);

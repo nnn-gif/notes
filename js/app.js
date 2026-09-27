@@ -58,14 +58,33 @@ const TYPES = {
 };
 const TYPE_ORDER = ["note", "list", "daily"];
 
+const WIDGETS = {
+  calendar: {
+    id: "calendar",
+    label: "Calendar",
+    icon: "▦",
+    defaults: { x: 16, y: 16, w: 380, h: 420 },
+    minW: 300, minH: 340,
+  },
+  today: {
+    id: "today",
+    label: "Today",
+    icon: "✓",
+    defaults: { x: 420, y: 16, w: 380, h: 260 },
+    minW: 260, minH: 180,
+  },
+};
+
 const state = {
   notes: [],
   theme: "dark",
   query: "",
   editingId: null,
   hydrated: false,
-  calCursor: null, // {y, m} month shown in calendar
+  calCursor: null, // {y, m} month shown in calendar widget
   selectedDay: null, // "YYYY-MM-DD" day opened in day panel
+  widgets: [], // [{ id, type, x, y, w, h }]
+  layoutMode: false,
 };
 
 const $ = (id) => document.getElementById(id);
@@ -88,6 +107,7 @@ const els = {
   calendar: $("calendar"), calTitle: $("cal-title"), calGrid: $("cal-grid"),
   calPrev: $("cal-prev"), calNext: $("cal-next"), calToday: $("cal-today-btn"),
   dayPanel: $("day-panel"),
+  widgetBoard: $("widget-board"), btnWidgets: $("btn-widgets"),
 };
 
 /* ================= helpers ================= */
@@ -139,7 +159,7 @@ function migrateNotes(list) {
 }
 
 function persist() {
-  return store.set({ notes: state.notes });
+  return store.set({ notes: state.notes, widgets: state.widgets });
 }
 
 /* ================= clock ================= */
@@ -504,6 +524,131 @@ function renderDayPanel(key) {
     frag.appendChild(add);
   }
   els.dayPanel.replaceChildren(frag);
+}
+
+/* ================= widgets ================= */
+
+let dragCtx = null; // { id, mode: "move"|"resize", startX, startY, orig }
+let widgetsMenuEl = null;
+
+function vw() { return (typeof window !== "undefined" && window.innerWidth) || 1440; }
+function vh() { return (typeof window !== "undefined" && window.innerHeight) || 900; }
+
+function clampWidget(w) {
+  const def = WIDGETS[w.type];
+  w.w = Math.max(def.minW, Math.min(w.w, vw() - 80));
+  w.h = Math.max(def.minH, w.h);
+  w.x = Math.max(0, Math.min(w.x, vw() - w.w - 64));
+  w.y = Math.max(0, w.y);
+}
+
+function widgetFrameEl(w) {
+  const def = WIDGETS[w.type];
+  const frame = document.createElement("div");
+  frame.className = "widget";
+  frame.dataset.wid = w.id;
+  frame.style.left = w.x + "px";
+  frame.style.top = w.y + "px";
+  frame.style.width = w.w + "px";
+  frame.style.height = w.h + "px";
+
+  const head = document.createElement("div");
+  head.className = "widget-head";
+  const icon = document.createElement("span");
+  icon.className = "widget-icon";
+  icon.textContent = def.icon;
+  const label = document.createElement("span");
+  label.className = "widget-label";
+  label.textContent = def.label;
+  const rm = document.createElement("button");
+  rm.className = "widget-remove";
+  rm.title = "Remove widget";
+  rm.setAttribute("aria-label", "Remove " + def.label);
+  rm.textContent = "×";
+  rm.dataset.wact = "remove";
+  head.appendChild(icon);
+  head.appendChild(label);
+  head.appendChild(rm);
+  frame.appendChild(head);
+
+  const body = document.createElement("div");
+  body.className = "widget-body";
+  if (w.type === "calendar") {
+    els.calendar.hidden = false;
+    body.appendChild(els.calendar);
+  } else if (w.type === "today") {
+    els.todaySection.hidden = false;
+    body.appendChild(els.todaySection);
+  }
+  frame.appendChild(body);
+
+  const resize = document.createElement("div");
+  resize.className = "widget-resize";
+  resize.dataset.wact = "resize";
+  resize.title = "Resize";
+  frame.appendChild(resize);
+  return frame;
+}
+
+function renderWidgets() {
+  if (!state.hydrated) return;
+  const frag = document.createDocumentFragment();
+  let maxBottom = 0;
+  for (const w of state.widgets) {
+    frag.appendChild(widgetFrameEl(w));
+    maxBottom = Math.max(maxBottom, w.y + w.h);
+  }
+  els.widgetBoard.replaceChildren(frag);
+  els.widgetBoard.style.height = state.widgets.length ? maxBottom + 16 + "px" : "0";
+  if (!state.widgets.some((w) => w.type === "calendar")) els.calendar.hidden = true;
+  if (!state.widgets.some((w) => w.type === "today")) els.todaySection.hidden = true;
+}
+
+function addWidget(type) {
+  if (!WIDGETS[type]) return;
+  if (state.widgets.some((w) => w.type === type)) return; // one instance per type
+  const def = WIDGETS[type];
+  const w = { id: uid(), type, ...def.defaults };
+  const n = state.widgets.length;
+  w.x = Math.min(def.defaults.x + n * 24, vw() - w.w - 8);
+  w.y = Math.min(def.defaults.y + n * 24, vh() - w.h - 8);
+  clampWidget(w);
+  state.widgets.push(w);
+  persist().then(() => { renderWidgets(); renderCalendar(); renderToday(); });
+}
+
+function removeWidget(id) {
+  state.widgets = state.widgets.filter((w) => w.id !== id);
+  persist().then(renderWidgets);
+}
+
+function removeWidgetByType(type) {
+  const w = state.widgets.find((x) => x.type === type);
+  if (w) removeWidget(w.id);
+}
+
+function closeWidgetsMenu() {
+  if (widgetsMenuEl) { widgetsMenuEl.remove(); widgetsMenuEl = null; }
+}
+
+function toggleWidgetsMenu() {
+  if (widgetsMenuEl) { closeWidgetsMenu(); return; }
+  widgetsMenuEl = document.createElement("div");
+  widgetsMenuEl.className = "widgets-menu";
+  for (const def of Object.values(WIDGETS)) {
+    const row = document.createElement("button");
+    row.className = "wm-row";
+    const active = state.widgets.some((w) => w.type === def.id);
+    row.textContent = (active ? "−  Remove  " : "+  Add  ") + def.label;
+    row.dataset.wtype = def.id;
+    row.addEventListener("click", () => {
+      if (active) removeWidgetByType(def.id);
+      else addWidget(def.id);
+      closeWidgetsMenu();
+    });
+    widgetsMenuEl.appendChild(row);
+  }
+  document.body.appendChild(widgetsMenuEl);
 }
 
 /* ================= CRUD ================= */
@@ -952,6 +1097,68 @@ function wireEvents() {
     else if (e.key.toLowerCase() === "n") { e.preventDefault(); newNote("daily"); }
   });
 
+  // widgets
+  els.btnWidgets.addEventListener("click", (e) => {
+    e.stopPropagation();
+    toggleWidgetsMenu();
+  });
+  document.addEventListener("click", (e) => {
+    if (widgetsMenuEl && !widgetsMenuEl.contains(e.target) && e.target !== els.btnWidgets) closeWidgetsMenu();
+  });
+
+  els.widgetBoard.addEventListener("pointerdown", (e) => {
+    const frame = e.target.closest("[data-wid]");
+    if (!frame) return;
+    const wid = frame.dataset.wid;
+    const w = state.widgets.find((x) => x.id === wid);
+    if (!w) return;
+    const act = e.target.dataset.wact;
+    if (act === "remove") { removeWidget(wid); return; }
+    if (e.target.closest(".cal-day, .cal-arrow, .cal-jump, .dp-add, .dp-note-head, .today-line, input")) return;
+    if (act === "resize") dragCtx = { id: wid, mode: "resize", startX: e.clientX, startY: e.clientY, orig: { ...w } };
+    else if (e.target.closest(".widget-head")) dragCtx = { id: wid, mode: "move", startX: e.clientX, startY: e.clientY, orig: { ...w } };
+    else return;
+    frame.classList.add(dragCtx.mode === "move" ? "dragging" : "resizing");
+    e.preventDefault();
+  });
+  document.addEventListener("pointermove", (e) => {
+    if (!dragCtx) return;
+    const w = state.widgets.find((x) => x.id === dragCtx.id);
+    if (!w) return;
+    const dx = e.clientX - dragCtx.startX;
+    const dy = e.clientY - dragCtx.startY;
+    if (dragCtx.mode === "move") {
+      w.x = dragCtx.orig.x + dx;
+      w.y = dragCtx.orig.y + dy;
+    } else {
+      w.w = dragCtx.orig.w + dx;
+      w.h = dragCtx.orig.h + dy;
+    }
+    clampWidget(w);
+    const frame = els.widgetBoard.querySelector(`[data-wid="${dragCtx.id}"]`);
+    if (frame) {
+      frame.style.left = w.x + "px";
+      frame.style.top = w.y + "px";
+      frame.style.width = w.w + "px";
+      frame.style.height = w.h + "px";
+      els.widgetBoard.style.height = Math.max(
+        parseFloat(els.widgetBoard.style.height) || 0,
+        w.y + w.h + 16
+      ) + "px";
+    }
+  });
+  const endDrag = () => {
+    if (!dragCtx) return;
+    const { id } = dragCtx;
+    dragCtx = null;
+    const frame = els.widgetBoard.querySelector(`[data-wid="${id}"]`);
+    if (frame) frame.classList.remove("dragging", "resizing");
+    renderWidgets(); // recompute board height
+    persist();
+  };
+  document.addEventListener("pointerup", endDrag);
+  document.addEventListener("pointercancel", endDrag);
+
   // external changes (other windows/tabs)
   store.onChanged(debounce(async () => {
     if (state.editingId) return; // don't clobber an open editor
@@ -981,6 +1188,7 @@ function shiftMonth(delta) {
 function renderAll() {
   render();
   renderCalendar();
+  renderWidgets();
 }
 
 /* ================= init ================= */
@@ -991,9 +1199,24 @@ async function init() {
   tick();
   setInterval(tick, 1000);
 
-  const data = await store.get(["notes", "theme", "seeded"]);
+  const data = await store.get(["notes", "theme", "seeded", "widgets"]);
   state.notes = migrateNotes(data.notes);
   state.theme = data.theme === "light" ? "light" : "dark";
+  state.widgets = Array.isArray(data.widgets)
+    ? data.widgets.filter((w) => w && WIDGETS[w.type]).map((w) => {
+        const def = WIDGETS[w.type];
+        const out = { id: typeof w.id === "string" ? w.id : uid(), type: w.type,
+          x: Number(w.x) || 0, y: Number(w.y) || 0,
+          w: Number(w.w) || def.defaults.w, h: Number(w.h) || def.defaults.h };
+        clampWidget(out);
+        return out;
+      })
+    : [];
+  if (!Array.isArray(data.widgets)) {
+    // first run of v1.2: seed default layout — calendar widget, no today widget
+    state.widgets = [{ id: uid(), type: "calendar", ...WIDGETS.calendar.defaults }];
+    clampWidget(state.widgets[0]);
+  }
 
   if (!data.seeded && state.notes.length === 0) {
     const now = new Date();

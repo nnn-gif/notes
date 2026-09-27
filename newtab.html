@@ -56,10 +56,14 @@
         <button id="btn-new" class="btn-new" title="New note">+ Note</button>
         <button id="btn-new-list" class="btn-new ghost" title="New list">+ List</button>
         <button id="btn-new-daily" class="btn-new ghost" title="New daily todo">+ Daily <kbd>N</kbd></button>
+        <button id="btn-widgets" class="btn-new ghost" title="Widgets">▦ Widgets</button>
       </div>
     </div>
 
-    <!-- Today's daily todos — always first on the dashboard -->
+    <!-- Widgets board -->
+    <div id="widget-board" class="widget-board"></div>
+
+    <!-- widget template kept in JS; today section below is v1.1 legacy, hidden when widgets active -->
     <section class="today" id="today-section" hidden>
       <div class="today-head">
         <span class="today-label">Today</span>
